@@ -2,10 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline';" />
 <title>FloatingDownloads</title>
 <style>
-  /* Ported verbatim from floating-todo/index.html so the HUD matches. */
+  /* Custom properties ported verbatim from floating-todo/index.html.
+     Do not introduce new colour values here — everything below composes
+     from these. */
   :root {
     --bg: rgba(22, 22, 26, 0.94);
     --stroke: rgba(255, 255, 255, 0.10);
@@ -42,6 +44,10 @@
     overflow: hidden;
   }
 
+  /* The ONLY app-region drag zone in the app. Phase 3 makes the file rows
+     draggable, and a row inside a drag region cannot start an HTML5 drag —
+     so nothing below this header may ever be given -webkit-app-region: drag.
+     See context_v2.md, "Known gotchas". */
   header {
     -webkit-app-region: drag;
     flex: 0 0 auto;
@@ -60,7 +66,97 @@
     text-transform: uppercase;
   }
 
-  .body {
+  .count {
+    font-size: calc(11px * var(--scale));
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── List ──────────────────────────────────────────────── */
+
+  #list {
+    flex: 1 1 auto;
+    list-style: none;
+    overflow-y: auto;
+    padding: 8px 6px 8px 8px;
+    min-height: 0;
+  }
+  #list::-webkit-scrollbar { width: 8px; }
+  #list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.10);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  #list::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.20);
+    background-clip: content-box;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 6px 6px;
+    border-left: 2px solid transparent;
+    border-radius: 7px;
+    transition: background 160ms ease;
+  }
+  .row:hover { background: var(--hover); }
+
+  /* Selection must read as clearly stronger than hover. The accent left bar
+     is the primary signal; the doubled tint is a second layer of the SAME
+     --hover value painted over itself, so no new colour value is introduced. */
+  .row.selected {
+    background-color: var(--hover);
+    background-image: linear-gradient(var(--hover), var(--hover));
+    border-left-color: var(--accent);
+  }
+  .row.selected .icon,
+  .row.selected .date { color: var(--text); }
+
+  .icon {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    display: grid;
+    place-items: center;
+    color: var(--faint);
+  }
+  .icon svg { width: 13px; height: 13px; }
+  /* Folders read brighter than files, on top of the different glyph. */
+  .row.is-dir .icon { color: var(--muted); }
+
+  /* Middle truncation: the head shrinks and ellipsises, the tail (the file
+     extension) never shrinks, so ".pdf" stays visible at any panel width. */
+  .name {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    font-size: calc(13px * var(--scale));
+    line-height: 1.35;
+  }
+  .name-head {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .name-tail {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .date {
+    flex: 0 0 auto;
+    font-size: calc(11px * var(--scale));
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ── Empty and error states ────────────────────────────── */
+
+  .message {
     flex: 1 1 auto;
     display: grid;
     place-items: center;
@@ -69,7 +165,10 @@
     font-size: calc(12px * var(--scale));
     line-height: 1.5;
     color: var(--faint);
+    white-space: pre-line; /* the permission message is multi-line */
   }
+
+  [hidden] { display: none !important; }
 
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
@@ -80,10 +179,13 @@
   <div class="panel">
     <header>
       <span class="title">Downloads</span>
+      <span class="count" id="count"></span>
     </header>
-    <div class="body">
-      <!-- Phase 2 replaces this with the real ~/Downloads listing. -->
-    </div>
+
+    <ul id="list"></ul>
+    <p class="message" id="message" hidden></p>
   </div>
+
+  <script src="renderer.js"></script>
 </body>
 </html>

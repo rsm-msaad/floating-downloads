@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Generic drag cursor for a multi-file drag. Unlike icon.svg this is NOT a
+  template icon: it renders in colour, because macOS draws the drag image
+  as-is rather than inverting it.
+
+  Colours are the panel's existing text and muted custom-property values so
+  the drag image matches the UI it came from.
+
+  Regenerate with:  python3 build-icon.py
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- back sheet, offset up and right -->
+  <path d="M22 6h18l12 12v26H22z" fill="#83838E" stroke="#83838E" stroke-width="2" stroke-linejoin="round"/>
+  <!-- front sheet -->
+  <path d="M12 20h18l12 12v26H12z" fill="#ECECEF" stroke="#83838E" stroke-width="2" stroke-linejoin="round"/>
+  <!-- folded corner on the front sheet -->
+  <path d="M30 20v12h12" fill="none" stroke="#83838E" stroke-width="2" stroke-linejoin="round"/>
+</svg>

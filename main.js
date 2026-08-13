@@ -1,4 +1,6 @@
-const { app, BrowserWindow, Menu, Tray, screen, globalShortcut } = require('electron');
+const {
+  app, BrowserWindow, Menu, Tray, screen, globalShortcut, ipcMain, nativeImage
+} = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -96,6 +98,11 @@ function createWindow() {
     fullscreenable: false,
     skipTaskbar: true,
     show: false,
+    // The panel is summoned with showInactive(), so it is not the focused
+    // window. Without this, macOS swallows the first click to activate the
+    // window and the row never sees it — meaning the first click-drag after
+    // pressing the hotkey would do nothing.
+    acceptFirstMouse: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -123,6 +130,9 @@ function showPanel() {
     return;
   }
   win.showInactive();
+  // The renderer re-reads the folder on this, so the list is current every
+  // time the hotkey is pressed. Live watching is phase 5.
+  if (!win.webContents.isDestroyed()) win.webContents.send('panel-shown');
 }
 
 function hidePanel() {
@@ -186,6 +196,126 @@ function createTray() {
 
   tray.setContextMenu(menu);
 }
+
+// ── Downloads listing ─────────────────────────────────────
+// All filesystem access lives here in the main process. The renderer never
+// sees fs or any Node API — it gets plain objects across the bridge.
+
+ipcMain.handle('downloads:list', async () => {
+  const dir = app.getPath('downloads');
+
+  let dirents;
+  try {
+    dirents = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    // Most likely EPERM/EACCES from macOS TCC on first read, since this app
+    // is unsigned, or ENOENT if the folder has been moved.
+    console.error(`[downloads] cannot read ${dir}: ${err.code || 'UNKNOWN'} — ${err.message}`);
+    return { ok: false, code: err.code || 'UNKNOWN', dir };
+  }
+
+  // Leading dot covers .DS_Store along with every other dotfile.
+  const visible = dirents.filter((dirent) => !dirent.name.startsWith('.'));
+
+  // Stat concurrently. This folder can hold thousands of entries and the
+  // list is rebuilt on every panel show, so a sequential await here would
+  // be thousands of serial round-trips.
+  const settled = await Promise.all(visible.map(async (dirent) => {
+    const fullPath = path.join(dir, dirent.name);
+    let stats;
+    try {
+      // stat() follows symlinks, so an alias to a folder reads as a folder.
+      stats = await fs.promises.stat(fullPath);
+    } catch (err) {
+      try {
+        // Broken symlink: fall back to the link itself rather than dropping it.
+        stats = await fs.promises.lstat(fullPath);
+      } catch (lstatErr) {
+        console.error(`[downloads] skipping ${dirent.name}: ${lstatErr.message}`);
+        return null;
+      }
+    }
+    return {
+      name: dirent.name,
+      path: fullPath,
+      isDirectory: stats.isDirectory(),
+      modified: stats.mtimeMs
+    };
+  }));
+
+  const items = settled.filter(Boolean);
+  items.sort((a, b) => b.modified - a.modified);
+  return { ok: true, items, dir };
+});
+
+// ── Drag out ──────────────────────────────────────────────
+// Dragging a file to another app is NOT HTML5 drag and drop. The renderer
+// cancels the HTML5 drag and hands the paths here; webContents.startDrag
+// runs the real macOS drag session.
+//
+// startDrag must be called synchronously while the drag gesture is live, so
+// the icon cannot be awaited at that moment. app.getFileIcon is async, so
+// icons are warmed ahead of time (on hover and on selection) and read from
+// the cache here. A cache miss falls back to the generic icon rather than
+// delaying the drag.
+
+// app.getFileIcon(path, { size: 'large' }) CRASHES the whole app on
+// Electron 32.3.3 / macOS — a native NOTREACHED check failure, SIGTRAP, no
+// catchable JS error. 'small', 'normal', and omitting options all work.
+// 'normal' returns 32x32, so that is the drag icon size. Do not "upgrade"
+// this to 'large'.
+const FILE_ICON_SIZE = 'normal';
+const DRAG_ICON_PX = 32;
+const ICON_CACHE_LIMIT = 500;
+
+const iconCache = new Map();
+let genericDragIcon = null;
+
+function getGenericDragIcon() {
+  if (!genericDragIcon || genericDragIcon.isEmpty()) {
+    genericDragIcon = nativeImage
+      .createFromPath(path.join(__dirname, 'dragIcon.png'))
+      .resize({ width: DRAG_ICON_PX, height: DRAG_ICON_PX });
+  }
+  return genericDragIcon;
+}
+
+async function warmIcon(filePath) {
+  if (iconCache.has(filePath)) return;
+  try {
+    const image = await app.getFileIcon(filePath, { size: FILE_ICON_SIZE });
+    if (image.isEmpty()) return;
+    if (iconCache.size >= ICON_CACHE_LIMIT) iconCache.clear();
+    iconCache.set(filePath, image.resize({ width: DRAG_ICON_PX, height: DRAG_ICON_PX }));
+  } catch (err) {
+    console.error(`[drag] icon lookup failed for ${path.basename(filePath)}: ${err.message}`);
+  }
+}
+
+ipcMain.on('drag:warm', (event, paths) => {
+  if (!Array.isArray(paths)) return;
+  for (const filePath of paths.slice(0, 40)) warmIcon(filePath);
+});
+
+ipcMain.on('drag:start', (event, paths) => {
+  if (!Array.isArray(paths) || paths.length === 0) return;
+
+  // Real file icon for a single drag, generic stack for a multi-file drag.
+  let icon = paths.length === 1 ? iconCache.get(paths[0]) : null;
+  if (!icon || icon.isEmpty()) icon = getGenericDragIcon();
+
+  if (!icon || icon.isEmpty()) {
+    // startDrag throws on an empty icon, so bail with a reason instead.
+    console.error('[drag] no usable icon — is dragIcon.png missing? drag aborted');
+    return;
+  }
+
+  try {
+    event.sender.startDrag({ file: paths[0], files: paths, icon });
+  } catch (err) {
+    console.error(`[drag] startDrag failed: ${err.message}`);
+  }
+});
 
 // ── Lifecycle ─────────────────────────────────────────────
 
