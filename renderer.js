@@ -1,6 +1,6 @@
 'use strict';
 
-const listEl = document.getElementById('list');
+const columnsEl = document.getElementById('columns');
 const messageEl = document.getElementById('message');
 const countEl = document.getElementById('count');
 
@@ -17,10 +17,16 @@ const FILE_SVG =
   '</svg>';
 
 // ── State ─────────────────────────────────────────────────
-
-let items = [];               // current listing, index-aligned with the DOM
-const selected = new Set();   // selected full paths
-let anchorIndex = null;       // range-selection anchor
+// One entry per open column, left to right.
+//   path      absolute directory path this column lists
+//   items     entries, newest first
+//   selected  Set of selected paths — only ever non-empty in ONE column,
+//             because selection does not span columns
+//   anchor    index for shift-range selection
+//   openChild path of the folder in THIS column that opened the next one,
+//             drawn with the dimmer "path" highlight so the trail through
+//             the columns stays readable
+let columns = [];
 
 // ── Formatting ────────────────────────────────────────────
 
@@ -59,50 +65,122 @@ function splitName(name) {
 
 // ── Selection ─────────────────────────────────────────────
 
+function clearAllSelections() {
+  for (const column of columns) {
+    column.selected.clear();
+    column.anchor = null;
+  }
+}
+
+// Selection does not span columns, but Cmd- and Shift-click must be able to
+// extend the selection within their own column — so clear every OTHER one.
+function clearSelectionsExcept(keepIndex) {
+  columns.forEach((column, columnIndex) => {
+    if (columnIndex === keepIndex) return;
+    column.selected.clear();
+    column.anchor = null;
+  });
+}
+
 function syncSelectionClasses() {
-  for (const row of listEl.children) {
-    row.classList.toggle('selected', selected.has(row.dataset.path));
+  columns.forEach((column, columnIndex) => {
+    const columnEl = columnsEl.children[columnIndex];
+    if (!columnEl) return;
+    for (const row of columnEl.children) {
+      row.classList.toggle('selected', column.selected.has(row.dataset.path));
+      row.classList.toggle('path', column.openChild === row.dataset.path);
+    }
+  });
+}
+
+function updateCount() {
+  const active = columns[columns.length - 1];
+  countEl.textContent = active ? String(active.items.length) : '';
+}
+
+// ── Columns ───────────────────────────────────────────────
+
+function truncateColumnsAfter(columnIndex) {
+  if (columns.length > columnIndex + 1) {
+    columns.length = columnIndex + 1;
+    columns[columnIndex].openChild = null;
+    while (columnsEl.children.length > columnIndex + 1) {
+      columnsEl.lastElementChild.remove();
+    }
   }
 }
 
-function clearSelection() {
-  if (selected.size === 0) return;
-  selected.clear();
-  anchorIndex = null;
+async function openFolder(columnIndex, item) {
+  const result = await window.api.readDir(item.path);
+  if (!result.ok) {
+    // A folder that vanished or is blocked: leave the column trail as it is
+    // and report it, rather than opening an empty mystery column.
+    console.error(`[columns] cannot open ${item.name}: ${result.code}`);
+    return;
+  }
+
+  columns[columnIndex].openChild = item.path;
+  columns.push({
+    path: result.dir,
+    items: result.items,
+    selected: new Set(),
+    anchor: null,
+    openChild: null
+  });
+
+  columnsEl.append(buildColumn(columns.length - 1));
   syncSelectionClasses();
+  updateCount();
+
+  // Auto-scroll so the newest column is visible. The panel deliberately does
+  // not widen itself; the user resizes as they see fit.
+  columnsEl.scrollLeft = columnsEl.scrollWidth;
 }
 
-function selectOnly(index) {
-  selected.clear();
-  selected.add(items[index].path);
-  anchorIndex = index;
-}
+function onRowClick(event, columnIndex, rowIndex) {
+  const column = columns[columnIndex];
+  const item = column.items[rowIndex];
 
-function selectRange(index) {
-  const from = Math.min(anchorIndex, index);
-  const to = Math.max(anchorIndex, index);
-  selected.clear();
-  for (let i = from; i <= to; i++) selected.add(items[i].path);
-}
+  // Selection never spans columns — but this column's own selection has to
+  // survive, or Cmd/Shift could never extend it.
+  clearSelectionsExcept(columnIndex);
 
-function onRowClick(event, index) {
-  if (event.shiftKey && anchorIndex !== null) {
-    selectRange(index);
-  } else if (event.metaKey) {
-    const filePath = items[index].path;
-    if (selected.has(filePath)) selected.delete(filePath);
-    else selected.add(filePath);
-    anchorIndex = index;
+  const isRange = event.shiftKey && column.anchor !== null;
+  const isToggle = event.metaKey;
+
+  if (isRange) {
+    column.selected.clear();
+    const from = Math.min(column.anchor, rowIndex);
+    const to = Math.max(column.anchor, rowIndex);
+    for (let i = from; i <= to; i++) column.selected.add(column.items[i].path);
+  } else if (isToggle) {
+    if (column.selected.has(item.path)) column.selected.delete(item.path);
+    else column.selected.add(item.path);
+    column.anchor = rowIndex;
   } else {
-    selectOnly(index);
+    column.selected.clear();
+    column.selected.add(item.path);
+    column.anchor = rowIndex;
   }
-  syncSelectionClasses();
-  window.api.warmDragIcons([...selected]);
+
+  // Any click in a column invalidates everything to its right: the folder
+  // that opened those columns is no longer the selected one.
+  truncateColumnsAfter(columnIndex);
+
+  // Only a plain click on a single folder drills in. A multi-select is
+  // ambiguous about which folder to open, so it just selects.
+  if (item.isDirectory && !isRange && !isToggle) {
+    syncSelectionClasses();
+    openFolder(columnIndex, item);
+  } else {
+    syncSelectionClasses();
+    updateCount();
+  }
+
+  window.api.warmDragIcons([...column.selected]);
 }
 
-// ── Drag out ──────────────────────────────────────────────
-
-function onRowDragStart(event, index) {
+function onRowDragStart(event, columnIndex, rowIndex) {
   // The HTML5 drag is useless here: dataTransfer cannot hand a real file to
   // another macOS app. Cancel it and let the main process run a native drag
   // via webContents.startDrag instead.
@@ -113,19 +191,23 @@ function onRowDragStart(event, index) {
   // handoff. See context_v2.md, "Known gotchas".
   event.preventDefault();
 
-  // Dragging an unselected row drags just that row, and selects it so the
-  // visual state matches what is being dragged.
-  if (!selected.has(items[index].path)) {
-    selectOnly(index);
+  const column = columns[columnIndex];
+  const item = column.items[rowIndex];
+
+  // Dragging an unselected row drags just that row, in its own column.
+  if (!column.selected.has(item.path)) {
+    clearAllSelections();
+    column.selected.add(item.path);
+    column.anchor = rowIndex;
     syncSelectionClasses();
   }
 
-  window.api.startDrag([...selected]);
+  window.api.startDrag([...column.selected]);
 }
 
 // ── Rendering ─────────────────────────────────────────────
 
-function buildRow(item, index) {
+function buildRow(item, columnIndex, rowIndex) {
   const row = document.createElement('li');
   row.className = item.isDirectory ? 'row is-dir' : 'row';
   row.dataset.path = item.path;
@@ -156,8 +238,8 @@ function buildRow(item, index) {
 
   row.append(icon, name, date);
 
-  row.addEventListener('click', (event) => onRowClick(event, index));
-  row.addEventListener('dragstart', (event) => onRowDragStart(event, index));
+  row.addEventListener('click', (event) => onRowClick(event, columnIndex, rowIndex));
+  row.addEventListener('dragstart', (event) => onRowDragStart(event, columnIndex, rowIndex));
   // Warm the icon before the drag begins, so a single-file drag shows the
   // real macOS file icon rather than the generic fallback.
   row.addEventListener('mouseenter', () => window.api.warmDragIcons([item.path]));
@@ -165,8 +247,48 @@ function buildRow(item, index) {
   return row;
 }
 
+function buildColumn(columnIndex) {
+  const column = columns[columnIndex];
+  const columnEl = document.createElement('ul');
+  columnEl.className = 'column';
+  columnEl.dataset.index = String(columnIndex);
+
+  // Clicking a column's own padding, rather than a row, clears the selection.
+  columnEl.addEventListener('click', (event) => {
+    if (event.target === columnEl) {
+      clearAllSelections();
+      syncSelectionClasses();
+    }
+  });
+
+  if (column.items.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'column-empty';
+    empty.textContent = columnIndex === 0 ? 'Downloads is empty.' : 'Empty folder.';
+    columnEl.append(empty);
+    return columnEl;
+  }
+
+  const fragment = document.createDocumentFragment();
+  column.items.forEach((item, rowIndex) => {
+    fragment.append(buildRow(item, columnIndex, rowIndex));
+  });
+  columnEl.append(fragment);
+  return columnEl;
+}
+
+function renderColumns() {
+  const fragment = document.createDocumentFragment();
+  columns.forEach((_, columnIndex) => fragment.append(buildColumn(columnIndex)));
+  columnsEl.replaceChildren(fragment);
+  columnsEl.hidden = false;
+  messageEl.hidden = true;
+  syncSelectionClasses();
+  updateCount();
+}
+
 function showMessage(text) {
-  listEl.hidden = true;
+  columnsEl.hidden = true;
   messageEl.hidden = false;
   messageEl.textContent = text;
   countEl.textContent = '';
@@ -176,56 +298,81 @@ function errorText(code) {
   if (code === 'EACCES' || code === 'EPERM') {
     return 'macOS is blocking access to Downloads.\nGrant permission in System Settings → Privacy & Security → Files and Folders.';
   }
-  if (code === 'ENOENT') return 'No Downloads folder found.';
+  if (code === 'ENOENT' || code === 'ENOROOT') return 'No Downloads folder found.';
   if (code === 'ENOTDIR') return 'Downloads is not a folder.';
+  if (code === 'EOUTSIDE') return 'That folder is outside Downloads.';
   return `Could not read Downloads (${code}).`;
 }
 
-function render(result) {
-  // The listing is rebuilt from scratch, so stale selections cannot survive.
-  selected.clear();
-  anchorIndex = null;
+// ── Navigation ────────────────────────────────────────────
 
-  if (!result || !result.ok) {
-    items = [];
-    showMessage(errorText(result ? result.code : 'UNKNOWN'));
-    return;
-  }
-
-  items = result.items;
-
-  if (items.length === 0) {
-    showMessage('Downloads is empty.');
-    return;
-  }
-
-  const fragment = document.createDocumentFragment();
-  items.forEach((item, index) => fragment.append(buildRow(item, index)));
-
-  listEl.replaceChildren(fragment);
-  listEl.hidden = false;
-  messageEl.hidden = true;
-  countEl.textContent = String(items.length);
+function closeRightmostColumn() {
+  if (columns.length <= 1) return false;
+  columns.pop();
+  columns[columns.length - 1].openChild = null;
+  columnsEl.lastElementChild.remove();
+  clearAllSelections();
+  syncSelectionClasses();
+  updateCount();
+  columnsEl.scrollLeft = columnsEl.scrollWidth;
+  return true;
 }
 
 // ── Wiring ────────────────────────────────────────────────
 
+// Re-read every open column so the trail survives a hide/show. If a column's
+// folder has gone, the trail is truncated there rather than showing stale
+// contents.
 async function refresh() {
-  try {
-    render(await window.api.listDownloads());
-  } catch (err) {
-    console.error('[renderer] listDownloads failed:', err);
-    showMessage('Could not read Downloads.');
+  const paths = columns.length ? columns.map((column) => column.path) : [null];
+  const rebuilt = [];
+  let firstError = null;
+
+  for (const dirPath of paths) {
+    let result;
+    try {
+      result = await window.api.readDir(dirPath);
+    } catch (err) {
+      console.error('[renderer] readDir failed:', err);
+      result = { ok: false, code: 'UNKNOWN' };
+    }
+    if (!result.ok) {
+      if (rebuilt.length === 0) firstError = result.code;
+      break;
+    }
+    rebuilt.push({
+      path: result.dir,
+      items: result.items,
+      selected: new Set(),
+      anchor: null,
+      openChild: null
+    });
   }
+
+  if (rebuilt.length === 0) {
+    columns = [];
+    showMessage(errorText(firstError || 'UNKNOWN'));
+    return;
+  }
+
+  for (let i = 0; i < rebuilt.length - 1; i++) rebuilt[i].openChild = rebuilt[i + 1].path;
+  columns = rebuilt;
+  renderColumns();
 }
 
-// Clicking the list's own padding, rather than a row, clears the selection.
-listEl.addEventListener('click', (event) => {
-  if (event.target === listEl) clearSelection();
-});
-
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') clearSelection();
+  if (event.key === 'Escape') {
+    // Step back a level; at the root there is nothing to close, so clear.
+    if (!closeRightmostColumn()) {
+      clearAllSelections();
+      syncSelectionClasses();
+    }
+    return;
+  }
+  if (event.key === 'Backspace') {
+    event.preventDefault();
+    closeRightmostColumn();
+  }
 });
 
 refresh();

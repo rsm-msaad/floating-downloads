@@ -206,8 +206,48 @@ function createTray() {
 // All filesystem access lives here in the main process. The renderer never
 // sees fs or any Node API — it gets plain objects across the bridge.
 
-ipcMain.handle('downloads:list', async () => {
-  const dir = app.getPath('downloads');
+// ~/Downloads is the navigation ceiling. This is a security boundary, not a
+// UI convenience: the renderer may ask to read any path, so every request is
+// resolved through realpath (which follows symlinks) and rejected unless the
+// REAL path is the root or lives beneath it. Checking before resolving would
+// let a symlink inside Downloads point anywhere on the filesystem.
+let cachedRoot = null;
+
+async function getRoot() {
+  if (cachedRoot) return cachedRoot;
+  try {
+    cachedRoot = await fs.promises.realpath(app.getPath('downloads'));
+    return cachedRoot;
+  } catch (err) {
+    console.error(`[downloads] cannot resolve Downloads: ${err.code || 'UNKNOWN'}`);
+    return null;
+  }
+}
+
+function isWithinRoot(realPath, root) {
+  // The separator matters: without it, "/Users/x/DownloadsElsewhere" would
+  // pass a naive startsWith check against "/Users/x/Downloads".
+  return realPath === root || realPath.startsWith(root + path.sep);
+}
+
+ipcMain.handle('downloads:read', async (event, requestedPath) => {
+  const root = await getRoot();
+  if (!root) return { ok: false, code: 'ENOROOT' };
+
+  const target = typeof requestedPath === 'string' && requestedPath ? requestedPath : root;
+
+  let dir;
+  try {
+    dir = await fs.promises.realpath(target);
+  } catch (err) {
+    console.error(`[downloads] cannot resolve ${target}: ${err.code || 'UNKNOWN'}`);
+    return { ok: false, code: err.code || 'UNKNOWN' };
+  }
+
+  if (!isWithinRoot(dir, root)) {
+    console.error(`[security] blocked read outside Downloads: ${target} resolved to ${dir}`);
+    return { ok: false, code: 'EOUTSIDE' };
+  }
 
   let dirents;
   try {
@@ -250,7 +290,7 @@ ipcMain.handle('downloads:list', async () => {
 
   const items = settled.filter(Boolean);
   items.sort((a, b) => b.modified - a.modified);
-  return { ok: true, items, dir };
+  return { ok: true, items, dir, isRoot: dir === root };
 });
 
 // ── Drag out ──────────────────────────────────────────────
@@ -299,11 +339,34 @@ async function warmIcon(filePath) {
 
 ipcMain.on('drag:warm', (event, paths) => {
   if (!Array.isArray(paths)) return;
-  for (const filePath of paths.slice(0, 40)) warmIcon(filePath);
+  for (const filePath of paths.slice(0, 40)) {
+    if (isAllowedSync(filePath)) warmIcon(filePath);
+  }
 });
+
+// The same ceiling applies to dragging, not just reading: the renderer hands
+// over paths, so they are re-validated here rather than trusted. Sync because
+// startDrag has to be called while the drag gesture is still live.
+function isAllowedSync(filePath) {
+  try {
+    // Do not depend on an async read having already warmed the cache: a drag
+    // could otherwise be rejected purely because of call ordering.
+    if (!cachedRoot) cachedRoot = fs.realpathSync(app.getPath('downloads'));
+    return isWithinRoot(fs.realpathSync(filePath), cachedRoot);
+  } catch (err) {
+    return false;
+  }
+}
 
 ipcMain.on('drag:start', (event, paths) => {
   if (!Array.isArray(paths) || paths.length === 0) return;
+
+  const allowed = paths.filter(isAllowedSync);
+  if (allowed.length !== paths.length) {
+    console.error(`[security] blocked drag of ${paths.length - allowed.length} path(s) outside Downloads`);
+  }
+  if (allowed.length === 0) return;
+  paths = allowed;
 
   // Real file icon for a single drag, generic stack for a multi-file drag.
   let icon = paths.length === 1 ? iconCache.get(paths[0]) : null;

@@ -4,9 +4,11 @@ const { contextBridge, ipcRenderer } = require('electron');
 // only what is listed here. No fs, no path, no ipcRenderer itself — just
 // functions that move plain data across the bridge.
 contextBridge.exposeInMainWorld('api', {
-  // Resolves to { ok: true, items: [{name, path, isDirectory, modified}], dir }
-  // or { ok: false, code, dir } when the folder cannot be read.
-  listDownloads: () => ipcRenderer.invoke('downloads:list'),
+  // Read one directory. Pass null for ~/Downloads itself. Any path outside
+  // ~/Downloads is rejected in the main process with code 'EOUTSIDE'.
+  // Resolves to { ok: true, items: [{name, path, isDirectory, modified}], dir, isRoot }
+  // or { ok: false, code } when the folder cannot be read.
+  readDir: (dirPath) => ipcRenderer.invoke('downloads:read', dirPath),
 
   // Fires each time the panel is shown, so the list can refresh.
   onPanelShown: (callback) => ipcRenderer.on('panel-shown', () => callback()),
