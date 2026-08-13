@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';" />
+<title>FloatingDownloads</title>
+<style>
+  /* Ported verbatim from floating-todo/index.html so the HUD matches. */
+  :root {
+    --bg: rgba(22, 22, 26, 0.94);
+    --stroke: rgba(255, 255, 255, 0.10);
+    --hairline: rgba(255, 255, 255, 0.07);
+    --text: #ECECEF;
+    --muted: #83838E;
+    --faint: #5E5E68;
+    --accent: #7EE0B0;
+    --hover: rgba(255, 255, 255, 0.06);
+    --scale: 1;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    color: var(--text);
+    cursor: default;
+    user-select: none;
+  }
+
+  .panel {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    backdrop-filter: blur(28px) saturate(160%);
+    border: 1px solid var(--stroke);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+
+  header {
+    -webkit-app-region: drag;
+    flex: 0 0 auto;
+    height: 46px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 10px 0 14px;
+    border-bottom: 1px solid var(--hairline);
+  }
+
+  .title {
+    font-size: calc(11px * var(--scale));
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+
+  .body {
+    flex: 1 1 auto;
+    display: grid;
+    place-items: center;
+    padding: 0 26px;
+    text-align: center;
+    font-size: calc(12px * var(--scale));
+    line-height: 1.5;
+    color: var(--faint);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+  <div class="panel">
+    <header>
+      <span class="title">Downloads</span>
+    </header>
+    <div class="body">
+      <!-- Phase 2 replaces this with the real ~/Downloads listing. -->
+    </div>
+  </div>
+</body>
+</html>

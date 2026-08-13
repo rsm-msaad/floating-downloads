@@ -1,0 +1,14 @@
+{
+  "name": "floating-downloads",
+  "version": "0.1.0",
+  "description": "A macOS menu bar utility: a global hotkey toggles a floating always-on-top panel showing ~/Downloads",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "@electron/packager": "^18.0.0",
+    "electron": "^32.0.0"
+  }
+}

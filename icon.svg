@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Tray icon source. macOS template icon: pure black on transparent.
+  macOS inverts template icons automatically for light/dark menu bars,
+  which is why the rendered files are named trayTemplate.png.
+
+  Geometry is aligned to whole and half pixels on a 16x16 grid so the
+  shapes stay crisp at 1x. Regenerate the PNGs with:  python3 build-icon.py
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <g fill="#000000">
+    <!-- arrow shaft -->
+    <rect x="7" y="1" width="2" height="5"/>
+    <!-- arrowhead -->
+    <polygon points="4,5.5 12,5.5 8,10.5"/>
+    <!-- open tray: left rail, floor, right rail -->
+    <rect x="2" y="10" width="2" height="4"/>
+    <rect x="2" y="12" width="12" height="2"/>
+    <rect x="12" y="10" width="2" height="4"/>
+  </g>
+</svg>
