@@ -1,0 +1,64 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode: build products
+build/
+DerivedData/
+*.o
+*.a
+*.dSYM.zip
+*.dSYM
+*.ipa
+*.xcarchive
+*.hmap
+
+# Xcode: user-specific state (never shared)
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.perspectivev3
+*.mode1v3
+*.mode2v3
+*.pbxuser
+
+# Xcode: playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Packages/
+Package.pins
+*.xcodeproj/*.xcworkspace/xcuserdata/
+
+# This is an app target, not a library: the resolved dependency graph is a
+# lockfile and MUST be committed so builds are reproducible across machines.
+# The rules above would otherwise sweep it up.
+!**/xcshareddata/swiftpm/Package.resolved
+
+# Swift Playgrounds
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+
+# CocoaPods / Carthage (not used, guarded anyway)
+Pods/
+Carthage/Build/
+
+# Fastlane
+fastlane/report.xml
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# Accidental secrets (per repo convention: secret.md is never committed)
+secret.md
+*.env
+.env.local
