@@ -54,7 +54,7 @@ function stateFile() {
 
 function loadSettings() {
   const file = settingsFile();
-  settings = readJson(file, { hotkey: DEFAULT_HOTKEY });
+  settings = readJson(file, { hotkey: DEFAULT_HOTKEY, activeRoot: 'downloads' });
 
   // Materialise the file on first run so the hotkey is actually editable by
   // hand before a preferences UI exists, and so the failure message below
@@ -208,46 +208,75 @@ function createTray() {
 // All filesystem access lives here in the main process. The renderer never
 // sees fs or any Node API — it gets plain objects across the bridge.
 
-// ~/Downloads is the navigation ceiling. This is a security boundary, not a
-// UI convenience: the renderer may ask to read any path, so every request is
-// resolved through realpath (which follows symlinks) and rejected unless the
-// REAL path is the root or lives beneath it. Checking before resolving would
-// let a symlink inside Downloads point anywhere on the filesystem.
-let cachedRoot = null;
+// The allowed roots are the navigation ceiling. This is a security boundary,
+// not a UI convenience: the renderer may ask for any path, so every request
+// is resolved through realpath (which follows symlinks) and rejected unless
+// the REAL path is one of the roots or lives beneath one. Resolving AFTER
+// checking would let a symlink inside a root point anywhere on the disk.
+//
+// To add a third root, add one entry here. Everything else — reading,
+// dragging, Quick Look, Reveal, Copy Path, Move to Trash — validates through
+// containingRoot() and needs no change.
+const ROOT_DEFS = [
+  { key: 'downloads', label: 'Downloads', pathName: 'downloads' },
+  { key: 'desktop', label: 'Desktop', pathName: 'desktop' }
+];
 
-async function getRoot() {
-  if (cachedRoot) return cachedRoot;
-  try {
-    cachedRoot = await fs.promises.realpath(app.getPath('downloads'));
-    return cachedRoot;
-  } catch (err) {
-    console.error(`[downloads] cannot resolve Downloads: ${err.code || 'UNKNOWN'}`);
-    return null;
+let cachedRoots = null;
+
+// Resolved synchronously: startDrag has to validate while the drag gesture is
+// still live, so an async-only resolver would be unusable there. Both the
+// sync and async call sites share this one cache, so they can never disagree
+// about what is allowed.
+function getRoots() {
+  if (cachedRoots) return cachedRoots;
+  cachedRoots = [];
+  for (const def of ROOT_DEFS) {
+    try {
+      cachedRoots.push({ ...def, path: fs.realpathSync(app.getPath(def.pathName)) });
+    } catch (err) {
+      console.error(`[roots] cannot resolve ${def.label}: ${err.code || err.message}`);
+    }
   }
+  return cachedRoots;
 }
 
-function isWithinRoot(realPath, root) {
-  // The separator matters: without it, "/Users/x/DownloadsElsewhere" would
-  // pass a naive startsWith check against "/Users/x/Downloads".
-  return realPath === root || realPath.startsWith(root + path.sep);
+// Returns the root containing realPath, or null. The separator matters:
+// without it, "/Users/x/DownloadsElsewhere" would pass a naive startsWith
+// check against "/Users/x/Downloads".
+function containingRoot(realPath) {
+  return getRoots().find(
+    (root) => realPath === root.path || realPath.startsWith(root.path + path.sep)
+  ) || null;
 }
 
-ipcMain.handle('downloads:read', async (event, requestedPath) => {
-  const root = await getRoot();
-  if (!root) return { ok: false, code: 'ENOROOT' };
+ipcMain.handle('roots:list', () => ({
+  roots: getRoots().map(({ key, label, path: rootPath }) => ({ key, label, path: rootPath })),
+  activeRoot: settings.activeRoot || ROOT_DEFS[0].key
+}));
 
-  const target = typeof requestedPath === 'string' && requestedPath ? requestedPath : root;
+ipcMain.on('settings:active-root', (event, key) => {
+  if (!getRoots().some((root) => root.key === key)) return;
+  settings = { ...settings, activeRoot: key };
+  writeJsonAtomic(settingsFile(), settings);
+});
+
+ipcMain.handle('dir:read', async (event, requestedPath) => {
+  const roots = getRoots();
+  if (roots.length === 0) return { ok: false, code: 'ENOROOT' };
+
+  const target = typeof requestedPath === 'string' && requestedPath ? requestedPath : roots[0].path;
 
   let dir;
   try {
     dir = await fs.promises.realpath(target);
   } catch (err) {
-    console.error(`[downloads] cannot resolve ${target}: ${err.code || 'UNKNOWN'}`);
+    console.error(`[read] cannot resolve ${target}: ${err.code || 'UNKNOWN'}`);
     return { ok: false, code: err.code || 'UNKNOWN' };
   }
 
-  if (!isWithinRoot(dir, root)) {
-    console.error(`[security] blocked read outside Downloads: ${target} resolved to ${dir}`);
+  if (!containingRoot(dir)) {
+    console.error(`[security] blocked read outside all roots: ${target} resolved to ${dir}`);
     return { ok: false, code: 'EOUTSIDE' };
   }
 
@@ -292,7 +321,7 @@ ipcMain.handle('downloads:read', async (event, requestedPath) => {
 
   const items = settled.filter(Boolean);
   items.sort((a, b) => b.modified - a.modified);
-  return { ok: true, items, dir, isRoot: dir === root };
+  return { ok: true, items, dir, isRoot: getRoots().some((root) => root.path === dir) };
 });
 
 // ── Drag out ──────────────────────────────────────────────
@@ -351,10 +380,10 @@ ipcMain.on('drag:warm', (event, paths) => {
 // startDrag has to be called while the drag gesture is still live.
 function isAllowedSync(filePath) {
   try {
-    // Do not depend on an async read having already warmed the cache: a drag
-    // could otherwise be rejected purely because of call ordering.
-    if (!cachedRoot) cachedRoot = fs.realpathSync(app.getPath('downloads'));
-    return isWithinRoot(fs.realpathSync(filePath), cachedRoot);
+    // getRoots() resolves lazily and caches, so this never depends on an
+    // async read having run first: a drag could otherwise be rejected purely
+    // because of call ordering.
+    return containingRoot(fs.realpathSync(filePath)) !== null;
   } catch (err) {
     return false;
   }

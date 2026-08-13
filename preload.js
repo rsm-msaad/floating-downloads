@@ -4,11 +4,18 @@ const { contextBridge, ipcRenderer } = require('electron');
 // only what is listed here. No fs, no path, no ipcRenderer itself — just
 // functions that move plain data across the bridge.
 contextBridge.exposeInMainWorld('api', {
-  // Read one directory. Pass null for ~/Downloads itself. Any path outside
-  // ~/Downloads is rejected in the main process with code 'EOUTSIDE'.
+  // The allowed roots, and which one was last active.
+  // Resolves to { roots: [{key, label, path}], activeRoot }.
+  listRoots: () => ipcRenderer.invoke('roots:list'),
+
+  // Persist the active root so it survives a restart.
+  setActiveRoot: (key) => ipcRenderer.send('settings:active-root', key),
+
+  // Read one directory. Pass null for the first root. Any path outside every
+  // allowed root is rejected in the main process with code 'EOUTSIDE'.
   // Resolves to { ok: true, items: [{name, path, isDirectory, modified}], dir, isRoot }
   // or { ok: false, code } when the folder cannot be read.
-  readDir: (dirPath) => ipcRenderer.invoke('downloads:read', dirPath),
+  readDir: (dirPath) => ipcRenderer.invoke('dir:read', dirPath),
 
   // Fires each time the panel is shown, so the list can refresh.
   onPanelShown: (callback) => ipcRenderer.on('panel-shown', () => callback()),

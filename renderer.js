@@ -3,6 +3,7 @@
 const columnsEl = document.getElementById('columns');
 const messageEl = document.getElementById('message');
 const countEl = document.getElementById('count');
+const tabsEl = document.getElementById('tabs');
 
 // Static markup only — never interpolated with filenames.
 const FOLDER_SVG =
@@ -31,6 +32,10 @@ let columns = [];
 // Quick Look is an external qlmanage process. This tracks whether we believe
 // it is open, so Space can toggle and Escape can claim the keypress.
 let quickLookOpen = false;
+
+// The allowed roots, and which one the column trail currently belongs to.
+let roots = [];
+let activeRootKey = null;
 
 // ── Formatting ────────────────────────────────────────────
 
@@ -378,11 +383,49 @@ function closeRightmostColumn() {
 
 // ── Wiring ────────────────────────────────────────────────
 
+// ── Roots ─────────────────────────────────────────────────
+
+function activeRoot() {
+  return roots.find((root) => root.key === activeRootKey) || roots[0] || null;
+}
+
+function syncTabClasses() {
+  for (const button of tabsEl.children) {
+    button.classList.toggle('active', button.dataset.key === activeRootKey);
+  }
+}
+
+async function switchRoot(key) {
+  if (key === activeRootKey) return;
+  activeRootKey = key;
+  syncTabClasses();
+  window.api.setActiveRoot(key);
+  // The trail belongs to the old root, so it is discarded rather than
+  // preserved per tab.
+  columns = [];
+  await refresh();
+}
+
+function buildTabs() {
+  const fragment = document.createDocumentFragment();
+  for (const root of roots) {
+    const button = document.createElement('button');
+    button.className = 'tab';
+    button.dataset.key = root.key;
+    button.textContent = root.label;
+    button.addEventListener('click', () => switchRoot(root.key));
+    fragment.append(button);
+  }
+  tabsEl.replaceChildren(fragment);
+  syncTabClasses();
+}
+
 // Re-read every open column so the trail survives a hide/show. If a column's
 // folder has gone, the trail is truncated there rather than showing stale
 // contents.
 async function refresh() {
-  const paths = columns.length ? columns.map((column) => column.path) : [null];
+  const root = activeRoot();
+  const paths = columns.length ? columns.map((column) => column.path) : [root ? root.path : null];
   const rebuilt = [];
   let firstError = null;
 
@@ -452,5 +495,24 @@ window.api.onQuickLookClosed(() => { quickLookOpen = false; });
 
 window.api.onFilesChanged(refresh);
 
-refresh();
+async function init() {
+  try {
+    const result = await window.api.listRoots();
+    roots = result.roots || [];
+    activeRootKey = result.activeRoot;
+  } catch (err) {
+    console.error('[renderer] listRoots failed:', err);
+    roots = [];
+  }
+  if (roots.length === 0) {
+    showMessage('No readable folders found.');
+    return;
+  }
+  // A persisted root that no longer resolves falls back to the first one.
+  if (!roots.some((root) => root.key === activeRootKey)) activeRootKey = roots[0].key;
+  buildTabs();
+  await refresh();
+}
+
+init();
 window.api.onPanelShown(refresh);
