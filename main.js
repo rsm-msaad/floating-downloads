@@ -194,7 +194,12 @@ function createTray() {
     { role: 'quit', label: 'Quit FloatingDownloads' }
   ]);
 
-  tray.setContextMenu(menu);
+  // Deliberately NOT tray.setContextMenu(menu). On macOS, assigning a
+  // context menu makes a left-click open that menu and suppresses the
+  // 'click' event, so left-click could never toggle the panel. Popping the
+  // menu up by hand on right-click keeps both gestures working.
+  tray.on('click', togglePanel);
+  tray.on('right-click', () => tray.popUpContextMenu(menu));
 }
 
 // ── Downloads listing ─────────────────────────────────────
