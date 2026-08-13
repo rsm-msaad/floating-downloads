@@ -28,6 +28,10 @@ const FILE_SVG =
 //             the columns stays readable
 let columns = [];
 
+// Quick Look is an external qlmanage process. This tracks whether we believe
+// it is open, so Space can toggle and Escape can claim the keypress.
+let quickLookOpen = false;
+
 // ── Formatting ────────────────────────────────────────────
 
 function startOfDay(date) {
@@ -180,6 +184,58 @@ function onRowClick(event, columnIndex, rowIndex) {
   window.api.warmDragIcons([...column.selected]);
 }
 
+// Select a single row without any modifier semantics — used by right-click
+// on a row outside the current selection.
+function selectSingle(columnIndex, rowIndex) {
+  clearAllSelections();
+  const column = columns[columnIndex];
+  column.selected.add(column.items[rowIndex].path);
+  column.anchor = rowIndex;
+  syncSelectionClasses();
+}
+
+function onRowDoubleClick(columnIndex, rowIndex) {
+  const item = columns[columnIndex].items[rowIndex];
+  // A folder is already drilled into by the preceding single click, and
+  // re-opening would discard and rebuild the identical column. Folders are
+  // never opened in Finder.
+  if (item.isDirectory) return;
+  window.api.openFile(item.path);
+}
+
+function onRowContextMenu(event, columnIndex, rowIndex) {
+  event.preventDefault();
+  const column = columns[columnIndex];
+  const item = column.items[rowIndex];
+
+  // Right-clicking inside the selection keeps it and acts on all of it;
+  // right-clicking outside selects that row first.
+  if (!column.selected.has(item.path)) selectSingle(columnIndex, rowIndex);
+
+  window.api.showContextMenu([...column.selected]);
+}
+
+// ── Quick Look ────────────────────────────────────────────
+
+function selectedPaths() {
+  for (const column of columns) {
+    if (column.selected.size > 0) return [...column.selected];
+  }
+  return [];
+}
+
+function toggleQuickLook() {
+  if (quickLookOpen) {
+    window.api.dismissQuickLook();
+    quickLookOpen = false;
+    return;
+  }
+  const paths = selectedPaths();
+  if (paths.length === 0) return;
+  window.api.quickLook(paths);
+  quickLookOpen = true;
+}
+
 function onRowDragStart(event, columnIndex, rowIndex) {
   // The HTML5 drag is useless here: dataTransfer cannot hand a real file to
   // another macOS app. Cancel it and let the main process run a native drag
@@ -239,6 +295,8 @@ function buildRow(item, columnIndex, rowIndex) {
   row.append(icon, name, date);
 
   row.addEventListener('click', (event) => onRowClick(event, columnIndex, rowIndex));
+  row.addEventListener('dblclick', () => onRowDoubleClick(columnIndex, rowIndex));
+  row.addEventListener('contextmenu', (event) => onRowContextMenu(event, columnIndex, rowIndex));
   row.addEventListener('dragstart', (event) => onRowDragStart(event, columnIndex, rowIndex));
   // Warm the icon before the drag begins, so a single-file drag shows the
   // real macOS file icon rather than the generic fallback.
@@ -362,18 +420,37 @@ async function refresh() {
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
-    // Step back a level; at the root there is nothing to close, so clear.
-    if (!closeRightmostColumn()) {
-      clearAllSelections();
-      syncSelectionClasses();
+    // Resolution order matters: Quick Look first, then step back a column,
+    // then clear the selection.
+    if (quickLookOpen) {
+      window.api.dismissQuickLook();
+      quickLookOpen = false;
+      return;
     }
+    if (closeRightmostColumn()) return;
+    clearAllSelections();
+    syncSelectionClasses();
     return;
   }
+
   if (event.key === 'Backspace') {
     event.preventDefault();
     closeRightmostColumn();
+    return;
+  }
+
+  if (event.key === ' ') {
+    // Otherwise Space scrolls the column.
+    event.preventDefault();
+    toggleQuickLook();
   }
 });
+
+// qlmanage can be closed from outside the app; without this the next Space
+// would try to dismiss a panel that has already gone.
+window.api.onQuickLookClosed(() => { quickLookOpen = false; });
+
+window.api.onFilesChanged(refresh);
 
 refresh();
 window.api.onPanelShown(refresh);

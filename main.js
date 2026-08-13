@@ -1,6 +1,8 @@
 const {
-  app, BrowserWindow, Menu, Tray, screen, globalShortcut, ipcMain, nativeImage
+  app, BrowserWindow, Menu, Tray, screen, globalShortcut, ipcMain, nativeImage,
+  shell, clipboard
 } = require('electron');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -385,6 +387,116 @@ ipcMain.on('drag:start', (event, paths) => {
   }
 });
 
+// ── File actions ──────────────────────────────────────────
+// Every path is re-validated against the ~/Downloads ceiling before any
+// operation. The renderer supplies these paths, so they are not trusted —
+// least of all for Move to Trash.
+
+function notifyFilesChanged(webContents) {
+  if (webContents && !webContents.isDestroyed()) webContents.send('files-changed');
+}
+
+ipcMain.on('file:open', async (event, filePath) => {
+  if (!isAllowedSync(filePath)) {
+    console.error('[security] blocked open outside Downloads');
+    return;
+  }
+  // openPath resolves with an error STRING rather than rejecting.
+  const problem = await shell.openPath(filePath);
+  if (problem) console.error(`[open] ${path.basename(filePath)}: ${problem}`);
+});
+
+ipcMain.on('menu:show', (event, paths) => {
+  if (!Array.isArray(paths)) return;
+  const allowed = paths.filter(isAllowedSync);
+  if (allowed.length !== paths.length) {
+    console.error(`[security] blocked menu for ${paths.length - allowed.length} path(s) outside Downloads`);
+  }
+  if (allowed.length === 0) return;
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: 'Reveal in Finder',
+      // Multi-selection reveals the first item only.
+      click: () => shell.showItemInFolder(allowed[0])
+    },
+    {
+      label: 'Copy Path',
+      // One full POSIX path per line for a multi-selection.
+      click: () => clipboard.writeText(allowed.join('\n'))
+    },
+    {
+      label: 'Move to Trash',
+      // No confirmation: trashItem is recoverable from the Finder Trash.
+      click: async () => {
+        for (const target of allowed) {
+          try {
+            await shell.trashItem(target);
+          } catch (err) {
+            console.error(`[trash] ${path.basename(target)}: ${err.message}`);
+          }
+        }
+        notifyFilesChanged(event.sender);
+      }
+    }
+  ]);
+
+  menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
+});
+
+// ── Quick Look ────────────────────────────────────────────
+// qlmanage is a developer binary, not a supported API. It cannot be
+// dismissed programmatically, so the only way to close the panel is to kill
+// the child process — hence the tracking below. stdio is ignored because it
+// writes warnings to stderr. See context_v2.md, "Known gotchas".
+
+let quickLookProcess = null;
+
+function dismissQuickLook() {
+  if (!quickLookProcess) return;
+  try {
+    quickLookProcess.kill();
+  } catch (err) {
+    // Already gone.
+  }
+  quickLookProcess = null;
+}
+
+ipcMain.on('ql:preview', (event, paths) => {
+  if (!Array.isArray(paths)) return;
+  const allowed = paths.filter(isAllowedSync);
+  if (allowed.length === 0) return;
+
+  dismissQuickLook();
+
+  try {
+    quickLookProcess = spawn('qlmanage', ['-p', ...allowed], { stdio: 'ignore' });
+  } catch (err) {
+    console.error(`[quicklook] could not start qlmanage: ${err.message}`);
+    quickLookProcess = null;
+    return;
+  }
+
+  quickLookProcess.on('error', (err) => {
+    console.error(`[quicklook] qlmanage failed: ${err.message}`);
+    quickLookProcess = null;
+    notifyQuickLookClosed(event.sender);
+  });
+
+  // Closing the panel any other way must not leave the renderer thinking it
+  // is still open, or the next Space would try to dismiss nothing.
+  quickLookProcess.on('exit', () => {
+    quickLookProcess = null;
+    notifyQuickLookClosed(event.sender);
+  });
+});
+
+function notifyQuickLookClosed(webContents) {
+  if (webContents && !webContents.isDestroyed()) webContents.send('ql-closed');
+}
+
+ipcMain.on('ql:dismiss', () => dismissQuickLook());
+
 // ── Lifecycle ─────────────────────────────────────────────
 
 app.whenReady().then(() => {
@@ -406,7 +518,15 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // qlmanage is a detached child; without this a Quick Look panel would
+  // outlive the app with no way left to close it.
+  dismissQuickLook();
 });
+
+// will-quit does not fire on SIGINT/SIGTERM (e.g. Ctrl-C during `npm start`),
+// so the child is reaped here too.
+app.on('before-quit', () => dismissQuickLook());
+process.on('exit', () => dismissQuickLook());
 
 app.on('window-all-closed', () => {
   // With a tray icon, hiding the window must not quit the app on macOS.

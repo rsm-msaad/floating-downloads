@@ -18,5 +18,19 @@ contextBridge.exposeInMainWorld('api', {
   startDrag: (paths) => ipcRenderer.send('drag:start', paths),
 
   // Pre-resolve macOS file icons so the drag has one ready synchronously.
-  warmDragIcons: (paths) => ipcRenderer.send('drag:warm', paths)
+  warmDragIcons: (paths) => ipcRenderer.send('drag:warm', paths),
+
+  // Open a file in its default app. Folders are navigated, never opened.
+  openFile: (filePath) => ipcRenderer.send('file:open', filePath),
+
+  // Native context menu, built and popped up in the main process.
+  showContextMenu: (paths) => ipcRenderer.send('menu:show', paths),
+
+  // Quick Look, via qlmanage in the main process.
+  quickLook: (paths) => ipcRenderer.send('ql:preview', paths),
+  dismissQuickLook: () => ipcRenderer.send('ql:dismiss'),
+  onQuickLookClosed: (callback) => ipcRenderer.on('ql-closed', () => callback()),
+
+  // Fires after files are trashed, so the list can refresh.
+  onFilesChanged: (callback) => ipcRenderer.on('files-changed', () => callback())
 });
