@@ -68,6 +68,12 @@ contextBridge.exposeInMainWorld('api', {
   clipboardHasFiles: () => ipcRenderer.invoke('clipboard:has-files'),
   pasteInto: (destDir) => ipcRenderer.invoke('clipboard:paste', destDir),
 
+  // Preferences window only.
+  getPrefs: () => ipcRenderer.invoke('prefs:get'),
+  setHotkey: (accelerator) => ipcRenderer.invoke('prefs:set-hotkey', accelerator),
+  resetHotkey: () => ipcRenderer.invoke('prefs:reset-hotkey'),
+  closePrefs: () => ipcRenderer.send('prefs:close'),
+
   // Move to Trash. Same main-process implementation as the context menu item.
   trashPaths: (paths) => ipcRenderer.invoke('files:trash', paths),
 

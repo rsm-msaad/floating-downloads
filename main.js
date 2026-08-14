@@ -176,31 +176,90 @@ function togglePanel() {
 
 // ── Global hotkey ─────────────────────────────────────────
 
-function registerHotkey() {
-  const accelerator = settings.hotkey || DEFAULT_HOTKEY;
-
-  let registered = false;
+// Returns true only if the accelerator is now live.
+function tryRegister(accelerator) {
   try {
-    registered = globalShortcut.register(accelerator, togglePanel);
-  } catch (err) {
     // register() throws on a malformed accelerator string rather than
-    // returning false.
+    // returning false, so both failure modes have to be handled.
+    return globalShortcut.register(accelerator, togglePanel);
+  } catch (err) {
     console.error(`[hotkey] "${accelerator}" is not a valid accelerator: ${err.message}`);
-    return;
-  }
-
-  if (registered) {
-    console.log(`[hotkey] registered ${accelerator}`);
-  } else {
-    console.error(
-      `[hotkey] FAILED to register "${accelerator}" — another app has already ` +
-      `claimed it, or macOS reserves it. The tray menu still toggles the panel. ` +
-      `Change "hotkey" in ${settingsFile()} and restart.`
-    );
+    return false;
   }
 }
 
+function registerHotkey() {
+  const accelerator = settings.hotkey || DEFAULT_HOTKEY;
+
+  if (tryRegister(accelerator)) {
+    console.log(`[hotkey] registered ${accelerator}`);
+    return;
+  }
+
+  console.error(
+    `[hotkey] FAILED to register "${accelerator}" — another app has already ` +
+    `claimed it, or macOS reserves it. The tray menu still toggles the panel. ` +
+    `Change it in Preferences.`
+  );
+
+  // Never leave the app with no working hotkey if a fallback is available.
+  if (accelerator !== DEFAULT_HOTKEY && tryRegister(DEFAULT_HOTKEY)) {
+    settings.hotkey = DEFAULT_HOTKEY;
+    writeJsonAtomic(settingsFile(), settings);
+    console.log(`[hotkey] fell back to ${DEFAULT_HOTKEY}`);
+  }
+}
+
+// Swap the global shortcut live, with no restart. The old one is released
+// first — macOS will not hand the same combination to two registrations —
+// and restored if the new one cannot be claimed, so the app is never left
+// with no working hotkey.
+function changeHotkey(accelerator) {
+  const previous = settings.hotkey || DEFAULT_HOTKEY;
+
+  if (typeof accelerator !== 'string' || accelerator.trim() === '') {
+    return { ok: false, hotkey: previous, error: 'That is not a valid shortcut.' };
+  }
+
+  globalShortcut.unregister(previous);
+
+  if (tryRegister(accelerator)) {
+    settings = { ...settings, hotkey: accelerator };
+    writeJsonAtomic(settingsFile(), settings);
+    refreshTrayMenu();
+    console.log(`[hotkey] changed to ${accelerator}`);
+    return { ok: true, hotkey: accelerator };
+  }
+
+  // Put the previous one back rather than leaving the user with nothing.
+  const restored = tryRegister(previous);
+  if (!restored) {
+    console.error(`[hotkey] could not restore "${previous}" after a failed change`);
+  }
+  console.error(`[hotkey] "${accelerator}" is unavailable — another app holds it`);
+
+  return {
+    ok: false,
+    hotkey: previous,
+    error: `${accelerator} is already used by another app. Still using ${previous}.`
+  };
+}
+
 // ── Tray ──────────────────────────────────────────────────
+
+// Rebuilt whenever the hotkey changes, so the menu's accelerator label stays
+// truthful.
+let trayMenu = null;
+
+function refreshTrayMenu() {
+  trayMenu = Menu.buildFromTemplate([
+    { label: 'Toggle Panel', accelerator: settings.hotkey || DEFAULT_HOTKEY, click: togglePanel },
+    { type: 'separator' },
+    { label: 'Preferences…', click: () => openPreferences() },
+    { type: 'separator' },
+    { role: 'quit', label: 'Quit FloatingDownloads' }
+  ]);
+}
 
 function createTray() {
   // trayTemplate.png + @2x: the "Template" suffix is the macOS convention
@@ -208,20 +267,14 @@ function createTray() {
   tray = new Tray(path.join(__dirname, 'trayTemplate.png'));
   tray.setToolTip('FloatingDownloads');
 
-  const menu = Menu.buildFromTemplate([
-    { label: 'Toggle Panel', accelerator: settings.hotkey || DEFAULT_HOTKEY, click: togglePanel },
-    { type: 'separator' },
-    { label: 'Preferences…', enabled: false }, // no-op until phase 5
-    { type: 'separator' },
-    { role: 'quit', label: 'Quit FloatingDownloads' }
-  ]);
+  refreshTrayMenu();
 
   // Deliberately NOT tray.setContextMenu(menu). On macOS, assigning a
   // context menu makes a left-click open that menu and suppresses the
   // 'click' event, so left-click could never toggle the panel. Popping the
   // menu up by hand on right-click keeps both gestures working.
   tray.on('click', togglePanel);
-  tray.on('right-click', () => tray.popUpContextMenu(menu));
+  tray.on('right-click', () => tray.popUpContextMenu(trayMenu));
 }
 
 // ── Downloads listing ─────────────────────────────────────
@@ -1010,6 +1063,72 @@ ipcMain.on('preview:step', (event, delta) => {
   if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
     win.webContents.send('preview-step', delta);
   }
+});
+
+// ── Preferences window ────────────────────────────────────
+// A normal window, unlike the panel and the preview: it has a text input and
+// the user is deliberately interacting with it, so it SHOULD take focus.
+//
+// The same one-directional rule as the preview window applies, per
+// context_v4.md: opening this must not hide the panel, closing it must not
+// show the panel. Nothing here touches win's visibility at all.
+
+let prefsWin = null;
+
+function openPreferences() {
+  if (prefsWin && !prefsWin.isDestroyed()) {
+    prefsWin.show();
+    prefsWin.focus();
+    return;
+  }
+
+  prefsWin = new BrowserWindow({
+    width: 420,
+    height: 300,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    title: 'Preferences',
+    // Solid, because this window is not transparent. Matches --bg with the
+    // alpha flattened, so it reads as the same surface as the panel.
+    backgroundColor: '#16161A',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  prefsWin.loadFile(path.join(__dirname, 'preferences.html'));
+
+  // The panel floats above normal windows, so without this Preferences can
+  // open behind it and look like nothing happened. Not the 'floating' HUD
+  // treatment otherwise — this is an ordinary window.
+  prefsWin.setAlwaysOnTop(true, 'floating');
+
+  prefsWin.once('ready-to-show', () => {
+    // Unlike the panel and preview, this one takes focus on purpose.
+    prefsWin.show();
+    prefsWin.focus();
+  });
+
+  prefsWin.on('closed', () => { prefsWin = null; });
+}
+
+ipcMain.handle('prefs:get', () => ({
+  hotkey: settings.hotkey || DEFAULT_HOTKEY,
+  defaultHotkey: DEFAULT_HOTKEY
+}));
+
+ipcMain.handle('prefs:set-hotkey', (event, accelerator) => changeHotkey(accelerator));
+
+ipcMain.handle('prefs:reset-hotkey', () => changeHotkey(DEFAULT_HOTKEY));
+
+ipcMain.on('prefs:close', () => {
+  if (prefsWin && !prefsWin.isDestroyed()) prefsWin.close();
 });
 
 // ── Lifecycle ─────────────────────────────────────────────

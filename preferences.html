@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline';" />
+<title>Preferences</title>
+<style>
+  /* Same custom properties as the panel. This window is not transparent, so
+     --bg composites over the window's solid backgroundColor. */
+  :root {
+    --bg: rgba(22, 22, 26, 0.94);
+    --stroke: rgba(255, 255, 255, 0.10);
+    --hairline: rgba(255, 255, 255, 0.07);
+    --text: #ECECEF;
+    --muted: #83838E;
+    --faint: #5E5E68;
+    --accent: #7EE0B0;
+    --urgent: #F0736A;
+    --hover: rgba(255, 255, 255, 0.06);
+    --scale: 1;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    color: var(--text);
+    cursor: default;
+    user-select: none;
+  }
+
+  main {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 20px 22px;
+  }
+
+  h1 {
+    font-size: calc(11px * var(--scale));
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+
+  .label { font-size: calc(12px * var(--scale)); }
+
+  .hint {
+    font-size: calc(11px * var(--scale));
+    color: var(--faint);
+    line-height: 1.5;
+  }
+
+  /* The recorder. A button rather than an input: it captures key events
+     rather than accepting typed text. */
+  .recorder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 40px;
+    border: 1px solid var(--stroke);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: calc(15px * var(--scale));
+    letter-spacing: 0.06em;
+    cursor: default;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .recorder:hover { background: var(--hover); }
+  .recorder:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .recorder.recording {
+    border-color: var(--accent);
+    color: var(--faint);
+    font-size: calc(12px * var(--scale));
+    letter-spacing: 0.04em;
+  }
+
+  .row { display: flex; gap: 8px; align-items: center; }
+
+  .btn {
+    border: 1px solid var(--stroke);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: calc(11px * var(--scale));
+    padding: 5px 12px;
+    cursor: default;
+    transition: background 120ms ease;
+  }
+  .btn:hover { background: var(--hover); }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .spacer { flex: 1 1 auto; }
+
+  .status {
+    min-height: 30px;
+    font-size: calc(11px * var(--scale));
+    line-height: 1.45;
+    color: var(--faint);
+  }
+  .status.error { color: var(--urgent); }
+  .status.ok { color: var(--accent); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+  <main>
+    <h1>Preferences</h1>
+
+    <div class="field">
+      <span class="label">Global shortcut</span>
+      <button class="recorder" id="recorder" aria-label="Record a new global shortcut"></button>
+      <span class="hint">
+        Click to record, then press a combination including at least one modifier.
+        Escape cancels. macOS gives a shortcut to whichever app is frontmost, so
+        a combination another app already uses may do nothing while that app has
+        focus.
+      </span>
+    </div>
+
+    <p class="status" id="status"></p>
+
+    <div class="spacer"></div>
+
+    <div class="row">
+      <button class="btn" id="reset">Reset to default</button>
+      <div class="spacer"></div>
+      <button class="btn" id="close">Close</button>
+    </div>
+  </main>
+
+  <script src="preferences.js"></script>
+</body>
+</html>
