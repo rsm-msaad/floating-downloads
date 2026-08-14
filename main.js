@@ -50,6 +50,47 @@ function logEvent(line) {
   }
 }
 
+// ── Heartbeat ─────────────────────────────────────────────
+// The app is meant to run for days in the menu bar, and the failure that
+// prompted this was a long-running instance whose panel stopped appearing
+// while a fresh one was fine. A periodic sample means the log can show
+// whether the app was ALREADY in a bad state before the user noticed,
+// rather than only recording the moment they complained.
+
+const HEARTBEAT_MS = 5 * 60 * 1000;
+let heartbeatTimer = null;
+
+function describeWindow(target, label) {
+  if (!target) return `${label}=null`;
+  if (target.isDestroyed()) return `${label}=DESTROYED`;
+  return `${label}=ok/${target.isVisible() ? 'visible' : 'hidden'}`;
+}
+
+function heartbeat() {
+  const uptimeMinutes = Math.round(process.uptime() / 60);
+  const rssMb = Math.round(process.memoryUsage().rss / 1048576);
+
+  // Bounds are the other thing worth sampling: a window that drifts
+  // off-screen would show up here before anyone noticed it visually.
+  let bounds = 'n/a';
+  if (win && !win.isDestroyed()) bounds = JSON.stringify(win.getBounds());
+
+  logEvent(
+    `heartbeat uptime=${uptimeMinutes}m rss=${rssMb}MB ` +
+    `${describeWindow(win, 'panel')} bounds=${bounds} ` +
+    `${describeWindow(previewWin, 'preview')} ${describeWindow(prefsWin, 'prefs')} ` +
+    `watchers=${watchers.size} lastAction=${lastAction}`
+  );
+}
+
+function startHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(heartbeat, HEARTBEAT_MS);
+  // Do not hold the event loop open on account of logging.
+  if (heartbeatTimer.unref) heartbeatTimer.unref();
+  heartbeat(); // one sample immediately, so a short session still logs one
+}
+
 // Called at startup, before this session's 'start' line is written.
 function reportPreviousSession() {
   let text = '';
@@ -139,22 +180,55 @@ function saveState() {
 
 // ── Window ────────────────────────────────────────────────
 
+// Pull a rectangle back onto a real display's work area. getDisplayMatching
+// returns the NEAREST display when the rectangle is off all of them, so a
+// window stranded by an unplugged monitor lands somewhere reachable rather
+// than being clamped against a display it is nowhere near.
+function clampToWorkArea(bounds) {
+  const area = screen.getDisplayMatching(bounds).workArea;
+  const width = Math.min(bounds.width, area.width);
+  const height = Math.min(bounds.height, area.height);
+  return {
+    width,
+    height,
+    x: Math.max(area.x, Math.min(bounds.x, area.x + area.width - width)),
+    y: Math.max(area.y, Math.min(bounds.y, area.y + area.height - height))
+  };
+}
+
+// Called on every show, not only at creation. Displays can change while the
+// app is running — it lives in the menu bar for days — so bounds validated
+// once at launch are not validated forever. No-ops when nothing moves, so a
+// normal show does not incur a setBounds.
+function ensureOnScreen() {
+  if (!win || win.isDestroyed()) return;
+  const current = win.getBounds();
+  const clamped = clampToWorkArea(current);
+  if (
+    clamped.x === current.x && clamped.y === current.y &&
+    clamped.width === current.width && clamped.height === current.height
+  ) return;
+
+  win.setBounds(clamped);
+  const message = `moved back on-screen ${JSON.stringify(current)} -> ${JSON.stringify(clamped)}`;
+  console.log(`[window] ${message}`);
+  logEvent(message);
+}
+
 function createWindow() {
   const saved = loadState();
   const area = screen.getPrimaryDisplay().workArea;
 
   // Clamp a restored position so the window never opens off-screen, e.g.
-  // after a display is unplugged.
-  if (saved) {
-    saved.x = Math.max(area.x, Math.min(saved.x, area.x + area.width - saved.width));
-    saved.y = Math.max(area.y, Math.min(saved.y, area.y + area.height - saved.height));
-  }
+  // after a display is unplugged. ensureOnScreen() repeats this on every
+  // show, since the display layout can change while the app runs.
+  const start = saved ? clampToWorkArea(saved) : null;
 
   win = new BrowserWindow({
-    width: saved ? saved.width : PANEL_WIDTH,
-    height: saved ? saved.height : PANEL_HEIGHT,
-    x: saved ? saved.x : area.x + area.width - PANEL_WIDTH - 40,
-    y: saved ? saved.y : area.y + 60,
+    width: start ? start.width : PANEL_WIDTH,
+    height: start ? start.height : PANEL_HEIGHT,
+    x: start ? start.x : area.x + area.width - PANEL_WIDTH - 40,
+    y: start ? start.y : area.y + 60,
     minWidth: 280,
     minHeight: 200,
     frame: false,
@@ -196,9 +270,14 @@ function createWindow() {
 function showPanel() {
   if (!win || win.isDestroyed()) {
     createWindow();
-    win.once('ready-to-show', () => win.showInactive());
+    win.once('ready-to-show', () => {
+      ensureOnScreen();
+      win.showInactive();
+    });
     return;
   }
+  // Displays may have changed since the last show.
+  ensureOnScreen();
   win.showInactive();
   // The renderer re-reads the folder on this, so the list is current every
   // time the hotkey is pressed. Live watching is phase 5.
@@ -1539,6 +1618,7 @@ app.whenReady().then(() => {
   createWindow();
   createTray();
   registerHotkey();
+  startHeartbeat();
 
   // Show once on launch so the scaffold is visibly working, without taking
   // focus from whatever is frontmost.
@@ -1574,8 +1654,9 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   // Leaked fs watchers hold file descriptors open.
   unwatchAll();
+  clearInterval(heartbeatTimer);
   // The marker that distinguishes a clean exit from a crash on next launch.
-  logEvent(`clean-quit lastAction=${lastAction}`);
+  logEvent(`clean-quit uptime=${Math.round(process.uptime() / 60)}m lastAction=${lastAction}`);
 });
 
 app.on('window-all-closed', () => {

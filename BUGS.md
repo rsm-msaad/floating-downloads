@@ -7,41 +7,57 @@ Open bugs first, then fixed. Architecture context is in
 
 ## OPEN
 
-### The panel will not appear — hotkey and menu item both do nothing
+### A long-running instance stops showing the panel
 
-**Found:** 2026-08-14. **Status:** diagnosed, not fixed.
+**Found:** 2026-08-14. **Status:** open. **Almost certainly the same
+underlying stability problem as the SIGSEGV below — not a separate bug.**
 
-Tray icon and Preferences both work, so the main process is alive and IPC is
-fine. The panel simply never shows.
+A packaged instance roughly 3 hours old stopped showing the panel entirely:
+neither the hotkey nor the Toggle Panel menu item did anything. The tray and
+Preferences kept working, so the main process was alive and IPC was fine.
 
-Ruled out by diagnosis:
+**This is NOT a positioning bug and NOT a rendering bug.** Both were
+investigated and excluded:
 
-- **Not off-screen.** Saved bounds `888,123 304×421` are *fully inside* the
-  only attached display (`0,0 1280×800`, workArea `0,30 1280×723`).
-  `getDisplayMatching` returns that display.
-- **Renderer has not crashed.** No `render-process-gone` line in `crash.log`
-  for the running instance.
-- **The app does not think it is visible.** `lsof` shows **zero** file
-  descriptors for `~/Downloads` or `~/Desktop`. Watchers are armed on show and
-  dropped on hide, so their absence implies `isVisible()` is false. The panel
-  is not showing invisibly somewhere.
+*Positioning — excluded.* An instrumented run logged state at eight
+checkpoints across a full hide/show cycle. `win` was never null and never
+destroyed; `opacity=1`; `minimized=false`; bounds were constant at
+`888,123 304×421` with `insideWorkArea=true` every time, against
+`workArea {0,30,1280,723}`. `togglePanel` took the correct branch each time
+and `isVisible()` flipped correctly.
 
-Remaining hypotheses, in order of fit:
+*Rendering — excluded.* On a fresh instance: no `did-fail-load`, **zero**
+renderer console messages (uncaught exceptions would surface there), and a
+DOM probe showing `readyState=complete`, 2.5MB of markup, **2442 rows
+rendered**, both root tabs built, `panelRect 304×421`, background
+`rgba(22,22,26,0.94)`, opacity 1, error element hidden, and all 40 preload
+methods exposed. The CSP was also checked and is sufficient: the panel loads
+only `renderer.js` and inline styles, with no image, font, `url()`, `data:`
+or `fdfile:` resource anywhere.
 
-1. `showPanel()` takes the `isDestroyed()` branch, creates a fresh window, and
-   `ready-to-show` never fires — so `showInactive()` is never called. Fits
-   every observation without needing hotkey and menu to fail independently.
-2. `togglePanel()` is never reached at all.
-3. The window was destroyed and re-creation fails silently — `createWindow()`
-   has no error handling on `loadFile`.
+*Fresh instances are fine.* Confirmed visually by the author.
 
-**Next step:** one instrumented run logging `win === null`, `isDestroyed()`,
-`isVisible()` and `getBounds()` at the top of `togglePanel` and after
-`showInactive()`. That separates all three in a single toggle.
+So the failure is **state-dependent degradation in a long-running instance**,
+which is exactly the profile of the SIGSEGV below: same build, packaged, and
+only after hours of uptime. Treat them as one problem until evidence
+separates them.
 
-**Related gap found while diagnosing:** the off-screen clamp runs **only** in
-`createWindow()`, never on show. Not the cause here, since bounds are valid,
-but a real hole if a display is detached while the app runs.
+**What is now in place to catch it:** a heartbeat writes to `crash.log` every
+5 minutes with uptime, RSS, whether each window exists and is visible, the
+panel's bounds, the live watcher count, and the last action. If the panel
+stops appearing again, the log will show whether the app was already in a bad
+state beforehand — window destroyed, bounds drifted, watchers leaked, memory
+climbing — rather than only recording the moment it was noticed.
+
+**Note for next time:** the failing instance was killed to run the
+instrumented test before its state was captured. Do not do that again — the
+heartbeat now records passively, but `lsof`, the window state, and a
+screenshot should be taken from the FAILING process first.
+
+**Related gap, now fixed:** the off-screen clamp ran only in
+`createWindow()`, never on show. Not the cause here, since bounds were valid,
+but a real hole once a display is detached mid-session. `ensureOnScreen()`
+now re-clamps on every show and logs when it moves the window.
 
 ### SIGSEGV in the main process
 
