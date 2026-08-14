@@ -6,6 +6,7 @@ const countEl = document.getElementById('count');
 const tabsEl = document.getElementById('tabs');
 const toastEl = document.getElementById('toast');
 const popoverEl = document.getElementById('popover');
+const tooltipEl = document.getElementById('tooltip');
 
 // Static markup only — never interpolated with filenames.
 const FOLDER_SVG =
@@ -256,7 +257,9 @@ function showPreview(columnIndex, rowIndex) {
   const column = columns[columnIndex];
   if (!column) return;
   const item = column.items[rowIndex];
-  if (!item || item.isDirectory) return;
+  // Folders preview too, as a summary card — the main process decides which
+  // kind of card to build.
+  if (!item) return;
 
   previewColumnIndex = columnIndex;
   previewRowIndex = rowIndex;
@@ -281,19 +284,19 @@ function togglePreview() {
   if (location) showPreview(location.columnIndex, location.rowIndex);
 }
 
-// Walk to the previous/next FILE in the same column, skipping folders, and
-// update the open preview in place.
+// Walk to the previous/next row in the same column and update the open
+// preview in place. Files and folders are both previewable, so nothing is
+// skipped and the card type switches as needed.
 function stepPreview(delta) {
   if (!previewOpen || previewColumnIndex === null) return;
   const column = columns[previewColumnIndex];
   if (!column) return;
 
-  for (let i = previewRowIndex + delta; i >= 0 && i < column.items.length; i += delta) {
-    if (column.items[i].isDirectory) continue;
-    selectSingle(previewColumnIndex, i);
-    showPreview(previewColumnIndex, i);
-    return;
-  }
+  const next = previewRowIndex + delta;
+  if (next < 0 || next >= column.items.length) return;
+
+  selectSingle(previewColumnIndex, next);
+  showPreview(previewColumnIndex, next);
 }
 
 function onRowDragStart(event, columnIndex, rowIndex) {
@@ -335,7 +338,6 @@ function buildRow(item, columnIndex, rowIndex) {
 
   const name = document.createElement('span');
   name.className = 'name';
-  name.title = item.name;
   const parts = splitName(item.name);
 
   const head = document.createElement('span');
@@ -374,7 +376,6 @@ function buildRow(item, columnIndex, rowIndex) {
   // width. At most three pills plus a +N chip; the strip clips rather than
   // wrapping to a third line.
   if (item.tags && item.tags.length > 0) {
-    row.title = `${item.name}\nTags: ${item.tags.join(', ')}`;
     const strip = document.createElement('div');
     strip.className = 'tags';
     for (const tag of item.tags.slice(0, MAX_VISIBLE_TAGS)) strip.append(buildPill(tag));
@@ -393,7 +394,16 @@ function buildRow(item, columnIndex, rowIndex) {
   row.addEventListener('dragstart', (event) => onRowDragStart(event, columnIndex, rowIndex));
   // Warm the icon before the drag begins, so a single-file drag shows the
   // real macOS file icon rather than the generic fallback.
-  row.addEventListener('mouseenter', () => window.api.warmDragIcons([item.path]));
+  row.addEventListener('mouseenter', () => {
+    window.api.warmDragIcons([item.path]);
+    clearTimeout(tooltipTimer);
+    tooltipTimer = setTimeout(() => showTooltipFor(row, item), 450);
+  });
+  row.addEventListener('mouseleave', hideTooltip);
+  // A lingering tooltip during a drag or a menu would be noise.
+  row.addEventListener('mousedown', hideTooltip);
+  row.addEventListener('dragstart', hideTooltip);
+  row.addEventListener('contextmenu', hideTooltip);
 
   return row;
 }
@@ -441,6 +451,48 @@ const NOTE_SVG =
 const PIN_SVG =
   '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">' +
   '<path d="M7.2 1 11 4.8 9.6 6.2 9 5.6 6.9 7.7l-.3 2.2-1.1-1.1-2.4 2.4-.7-.7 2.4-2.4L3.7 7l2.2-.3L8 4.6l-.6-.6z"/></svg>';
+
+// ── Name tooltip ──────────────────────────────────────────
+// Only shown when the name is genuinely clipped, so most rows never get one.
+
+let tooltipTimer = null;
+
+function hideTooltip() {
+  clearTimeout(tooltipTimer);
+  tooltipTimer = null;
+  tooltipEl.hidden = true;
+}
+
+// The head span carries overflow:hidden and the ellipsis, so comparing its
+// scroll width against its client width is the real test of whether anything
+// is actually hidden.
+function isNameTruncated(row) {
+  const head = row.querySelector('.name-head');
+  return head ? head.scrollWidth > head.clientWidth + 1 : false;
+}
+
+function showTooltipFor(row, item) {
+  if (!isNameTruncated(row)) return;
+
+  tooltipEl.textContent = item.tags && item.tags.length > 0
+    ? `${item.name}\nTags: ${item.tags.join(', ')}`
+    : item.name;
+  tooltipEl.hidden = false;
+
+  const panel = document.querySelector('.panel').getBoundingClientRect();
+  const box = row.getBoundingClientRect();
+  const width = tooltipEl.offsetWidth;
+  const height = tooltipEl.offsetHeight;
+
+  let left = box.left - panel.left + 18;
+  left = Math.max(6, Math.min(left, panel.width - width - 6));
+  // Below the row by default, flipped above when there is no room.
+  let top = box.bottom - panel.top + 4;
+  if (top + height > panel.height - 6) top = box.top - panel.top - height - 4;
+
+  tooltipEl.style.left = `${left}px`;
+  tooltipEl.style.top = `${top}px`;
+}
 
 function markerButton(className, svg, label, onClick) {
   const button = document.createElement('button');
@@ -1121,6 +1173,9 @@ window.api.onPreviewClosed(() => {
 
 // Arrow keys pressed in the preview window: only this side knows the column.
 window.api.onPreviewStep(stepPreview);
+
+columnsEl.addEventListener('scroll', hideTooltip, true);
+columnsEl.addEventListener('mouseleave', hideTooltip);
 
 // A watched directory changed. Only that column's contents arrive.
 window.api.onDirChanged(applyDirChange);

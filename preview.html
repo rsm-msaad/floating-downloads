@@ -154,6 +154,62 @@
   }
   .preview-media[data-audio] { width: 70%; }
 
+  /* ── Folder card ───────────────────────────────────────── */
+
+  .body.kind-folder { flex-direction: column; }
+
+  .folder-card {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 20px;
+    overflow-y: auto;
+  }
+
+  .folder-stats {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 14px;
+    font-size: calc(12px * var(--scale));
+  }
+  .folder-stats dt { color: var(--faint); }
+  .folder-stats dd { font-variant-numeric: tabular-nums; }
+
+  .folder-heading {
+    font-size: calc(10px * var(--scale));
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding-top: 4px;
+    border-top: 1px solid var(--hairline);
+  }
+
+  .folder-list { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+
+  .folder-entry {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 3px 0;
+    font-size: calc(12px * var(--scale));
+    min-width: 0;
+  }
+  .folder-entry-icon {
+    flex: 0 0 auto;
+    width: 14px; height: 14px;
+    display: grid; place-items: center;
+    color: var(--faint);
+  }
+  .folder-entry-icon svg { width: 13px; height: 13px; }
+  .folder-entry-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .preview-fallback {
     margin: auto;
     display: flex;

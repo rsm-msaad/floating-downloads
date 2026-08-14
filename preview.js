@@ -32,8 +32,83 @@ function element(tag, className, props) {
   return node;
 }
 
+// The folder currently on screen, so a size that arrives later is only
+// applied if it belongs to this card.
+let currentFolderPath = null;
+
+const FOLDER_SVG =
+  '<svg viewBox="0 0 14 14" fill="currentColor" aria-hidden="true">' +
+  '<path d="M1 3.2c0-.66.54-1.2 1.2-1.2h3l1.4 1.4h5.2c.66 0 1.2.54 1.2 1.2v6c0 .66-.54 1.2-1.2 1.2H2.2c-.66 0-1.2-.54-1.2-1.2V3.2z"/>' +
+  '</svg>';
+
+const FILE_SVG =
+  '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">' +
+  '<path d="M3.5 1.6h4.4l2.6 2.6v8.2H3.5z" stroke-linejoin="round"/>' +
+  '<path d="M7.9 1.6v2.6h2.6" stroke-linejoin="round"/>' +
+  '</svg>';
+
+function renderFolder(info) {
+  currentFolderPath = info.path;
+
+  const card = element('div', 'folder-card');
+
+  const stats = element('dl', 'folder-stats');
+  const rows = [
+    ['Items', String(info.itemCount)],
+    // Placeholder until the recursive walk resolves.
+    ['Size', 'Calculating…'],
+    ['Modified', formatDate(info.modified)]
+  ];
+  for (const [label, value] of rows) {
+    stats.append(element('dt', null, { textContent: label }));
+    const dd = element('dd', null, { textContent: value });
+    if (label === 'Size') dd.id = 'folder-size';
+    stats.append(dd);
+  }
+  card.append(stats);
+
+  if (info.entries.length > 0) {
+    card.append(element('p', 'folder-heading', {
+      textContent: info.itemCount > info.shownCount
+        ? `First ${info.shownCount} of ${info.itemCount}`
+        : 'Contents'
+    }));
+
+    const list = element('ul', 'folder-list');
+    for (const entry of info.entries) {
+      const li = element('li', 'folder-entry');
+      const icon = element('span', 'folder-entry-icon');
+      icon.innerHTML = entry.isDirectory ? FOLDER_SVG : FILE_SVG; // static markup
+      // textContent, never innerHTML: these are untrusted filenames.
+      li.append(icon, element('span', 'folder-entry-name', { textContent: entry.name }));
+      list.append(li);
+    }
+    card.append(list);
+  } else {
+    card.append(element('p', 'folder-heading', { textContent: 'Empty folder' }));
+  }
+
+  bodyEl.className = 'body kind-folder';
+  bodyEl.replaceChildren(card);
+}
+
+// Arrives after the card is already on screen.
+window.api.onPreviewSize(({ path: folderPath, bytes, approximate }) => {
+  if (folderPath !== currentFolderPath) return;
+  const target = document.getElementById('folder-size');
+  if (target) target.textContent = `${approximate ? 'over ' : ''}${formatSize(bytes)}`;
+});
+
 function render(info) {
   nameEl.textContent = info.name;
+
+  if (info.kind === 'folder') {
+    metaEl.textContent = `${info.itemCount} item${info.itemCount === 1 ? '' : 's'}`;
+    renderFolder(info);
+    return;
+  }
+
+  currentFolderPath = null;
   metaEl.textContent = formatSize(info.size);
 
   bodyEl.className = 'body';

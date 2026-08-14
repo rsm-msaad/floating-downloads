@@ -1118,6 +1118,95 @@ async function readTextHead(filePath, size) {
   }
 }
 
+// ── Folder preview ────────────────────────────────────────
+
+const FOLDER_PREVIEW_ENTRIES = 20;
+
+// Hard cap on the recursive size walk. A folder with tens of thousands of
+// nested items must not hang the app, so the scan stops here and the size is
+// reported as approximate rather than running to completion.
+const SIZE_SCAN_CAP = 20000;
+
+// Bumped on every folder preview, so a slow scan for a folder the user has
+// already navigated away from cannot push a stale size.
+let sizeScanId = 0;
+
+async function folderSizeOnDisk(dir) {
+  let bytes = 0;
+  let visited = 0;
+  let approximate = false;
+  const stack = [dir];
+
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let dirents;
+    try {
+      dirents = await fs.promises.readdir(current, { withFileTypes: true });
+    } catch (err) {
+      continue; // unreadable subdirectory: skip rather than abort the walk
+    }
+
+    for (const dirent of dirents) {
+      if (visited >= SIZE_SCAN_CAP) { approximate = true; break; }
+      visited++;
+      const full = path.join(current, dirent.name);
+      // isDirectory() is false for symlinks, so links are counted by their
+      // own size and never followed — which is also what stops cycles.
+      if (dirent.isDirectory()) {
+        stack.push(full);
+      } else {
+        try {
+          const stats = await fs.promises.lstat(full);
+          bytes += stats.size;
+        } catch (err) {
+          // Vanished mid-walk.
+        }
+      }
+    }
+    if (approximate) break;
+  }
+
+  return { bytes, approximate };
+}
+
+async function buildFolderPreview(dirPath, stats) {
+  let dirents = [];
+  try {
+    dirents = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  } catch (err) {
+    return { ok: false, code: err.code || 'UNKNOWN' };
+  }
+
+  const visible = dirents.filter((dirent) => !dirent.name.startsWith('.'));
+  const entries = visible.slice(0, FOLDER_PREVIEW_ENTRIES).map((dirent) => ({
+    name: dirent.name,
+    isDirectory: dirent.isDirectory()
+  }));
+
+  const scan = ++sizeScanId;
+
+  // Computed after the card is on screen, so opening never waits on a
+  // recursive walk.
+  folderSizeOnDisk(dirPath).then(({ bytes, approximate }) => {
+    if (scan !== sizeScanId) return; // superseded by a newer preview
+    if (previewWin && !previewWin.isDestroyed() && !previewWin.webContents.isDestroyed()) {
+      previewWin.webContents.send('preview-size', { path: dirPath, bytes, approximate });
+    }
+  });
+
+  return {
+    ok: true,
+    kind: 'folder',
+    name: path.basename(dirPath),
+    path: dirPath,
+    modified: stats.mtimeMs,
+    itemCount: visible.length,
+    shownCount: entries.length,
+    entries,
+    size: null // filled in by the preview-size message
+  };
+}
+
 async function buildPreviewInfo(filePath) {
   if (!isAllowedSync(filePath)) {
     console.error('[security] blocked preview outside all roots');
@@ -1130,7 +1219,7 @@ async function buildPreviewInfo(filePath) {
   } catch (err) {
     return { ok: false, code: err.code || 'UNKNOWN' };
   }
-  if (stats.isDirectory()) return { ok: false, code: 'EISDIR' };
+  if (stats.isDirectory()) return buildFolderPreview(filePath, stats);
 
   const { kind, ext } = previewKind(filePath);
   const base = {

@@ -413,6 +413,28 @@
     box-shadow: inset 0 0 0 1px var(--accent);
   }
 
+  /* ── Name tooltip ──────────────────────────────────────── */
+  /* Shown only when a filename is actually clipped. pointer-events: none is
+     load-bearing — without it the tooltip would sit under the cursor and
+     swallow dragstart, drop and contextmenu on the row beneath. */
+
+  .tooltip {
+    position: absolute;
+    z-index: 20;
+    pointer-events: none;
+    max-width: 280px;
+    padding: 5px 8px;
+    border: 1px solid var(--stroke);
+    border-radius: 6px;
+    background: var(--bg);
+    backdrop-filter: blur(28px) saturate(160%);
+    color: var(--text);
+    font-size: calc(11px * var(--scale));
+    line-height: 1.4;
+    white-space: pre-line;
+    word-break: break-word;
+  }
+
   /* ── Error toast ───────────────────────────────────────── */
   /* Copy failures must be visible, not swallowed. */
 
@@ -466,6 +488,7 @@
     <div id="columns"></div>
     <p class="message" id="message" hidden></p>
     <div class="popover" id="popover" hidden></div>
+    <div class="tooltip" id="tooltip" hidden></div>
     <div class="toast" id="toast" hidden></div>
   </div>
 

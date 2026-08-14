@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('api', {
   // Preview window only: the payload to render.
   onPreviewData: (callback) => ipcRenderer.on('preview-data', (_event, info) => callback(info)),
 
+  // A folder's recursive size, which arrives after the card is on screen.
+  onPreviewSize: (callback) => ipcRenderer.on('preview-size', (_event, payload) => callback(payload)),
+
   // Panel only: keeps its belief about the preview in sync.
   onPreviewClosed: (callback) => ipcRenderer.on('preview-closed', () => callback()),
   onPreviewStep: (callback) => ipcRenderer.on('preview-step', (_event, delta) => callback(delta)),
