@@ -77,9 +77,14 @@ patterns is clear, and so the "do not copy" list below makes sense.
 - index.html / renderer.js: the main panel, tabs, columns, selection, tags,
   notes, pins
 - preview.html / preview.js: the preview window
+- preferences.html / preferences.js: the Preferences window and its shortcut
+  recorder
 - icon.svg / build-icon.py: tray icon sources, regenerate with
   python3 build-icon.py
-- app icon sources, generating icon.icns via iconutil
+- app-icon.svg: the full colour app icon source. build-icon.py renders it to
+  the ten iconset sizes and runs iconutil to produce icon.icns
+- drag-icon.svg: the generic icon for multi-file drags, since startDrag
+  throws without one
 - extend-info.plist: LSUIElement and bundle metadata for packaging
 - context_v1..v5.md: project history, v5 is current
 
@@ -107,10 +112,14 @@ patterns is clear, and so the "do not copy" list below makes sense.
 - Right click context menu: Reveal in Finder, Copy, Copy Path, Paste, Move
   to Trash, plus Add Tag, Add Note, Pin / Unpin
 - Cmd+Delete moves the selection to Trash, no confirmation, matching Finder
-- Preview in a separate floating window, opened with Space
+- Preview in a separate floating window, opened with Space. Works on folders
+  as well as files
+- Full name on hover for rows whose name is actually truncated
 - Live folder watching
-- Tags, notes, pins
+- Tags, notes, pins, with user-selectable tag colours
 - Packaged .app in /Applications, added to the Dock
+- Crash logging: crash.log in the app support directory, plus local Crashpad
+  minidumps
 
 ## Key implementation details
 
@@ -149,6 +158,32 @@ folder that opened the column to its right (single --hover tint plus a
   name, size, type, date, and an open button
 - Large media streams over a custom fdfile:// protocol handler rather than
   base64 over IPC
+- Folders preview too, as a summary card: full name, item count, recursive
+  size on disk, modification date, and the first 20 entries with icons. The
+  size is computed AFTER the card is on screen, so the window never waits on
+  the walk, and the card reads "Calculating..." until it resolves
+- The size walk is capped at 20000 entries and reports "over N" when capped,
+  so a pathological tree cannot hang the app. Both roots hit the cap in under
+  a second on this machine. Symlinked directories are never followed, which
+  also rules out cycles. A scan id stops a slow walk pushing a stale size
+  after the user has stepped away
+- Arrows do not skip folders. Stepping moves through files and folders
+  seamlessly and the card type switches with it
+
+### Truncated names
+Filenames middle-truncate to keep the extension visible, and parent columns
+are a fixed 240px, so long names clip. Hovering a row whose name is ACTUALLY
+clipped shows the full name after 450ms. Rows that fit show nothing.
+
+Truncation is detected by comparing scrollWidth against clientWidth on the
+.name-head span, the element carrying overflow:hidden and the ellipsis, so it
+reflects real clipping rather than guessing from name length.
+
+It is a custom tooltip, not the native title attribute: title was previously
+set on every row and fired regardless of truncation, and a light system
+tooltip over the dark translucent HUD looks foreign. pointer-events: none is
+load-bearing, or the tooltip would sit under the cursor and swallow
+dragstart, drop and contextmenu on the row beneath.
 
 ### Window coupling, deliberately one directional
 The reference app's two-window visibility coupling was identified as a
@@ -221,6 +256,30 @@ directory.
   permanently loses its tags and note, since metadata is keyed by path. Do
   not add path-following or recovery logic without asking
 
+### Crash logging
+A SIGSEGV on CrBrowserMain kills the main process outright, so NO JavaScript
+handler can observe it: not child-process-gone, not render-process-gone, not
+uncaughtException. Those events only fire when a CHILD dies and the main
+process survives. Three mechanisms run together:
+
+1. crashReporter.start({ uploadToServer: false }) writes local minidumps to
+   the Crashpad directory under the app support folder. This is the only
+   thing that captures a main-process crash
+2. A breadcrumb log, crash.log, in the app support directory. Every session
+   writes a start line; a clean exit writes clean-quit. A start with no
+   matching clean-quit is how an abrupt death is detected, on the NEXT
+   launch, and it is reported both to crash.log and the console
+3. child-process-gone and render-process-gone handlers, which cover renderer
+   and GPU crashes the main process does survive, and name which window died
+
+Every line carries lastAction, a rolling breadcrumb set by the operations
+most likely to be implicated: drag:start, getFileIcon, the fdfile stream,
+watch:set, copyInto, trash, and the folder size walk. So a crash log says
+what the app was last doing, not merely that it died.
+
+If the app vanishes from the menu bar, the first things to check are
+crash.log for an abrupt-end line, then ~/Library/Logs/DiagnosticReports.
+
 ### Persistence
 Window position and size, active tab, and hotkey live in
 ~/Library/Application Support/floating-downloads/settings.json. Metadata
@@ -270,6 +329,39 @@ only in preview.html.
 - qlmanage for previews. This WAS tried and removed, see gotchas
 
 ## Known gotchas
+
+- UNRESOLVED: a SIGSEGV in the main process. Three crashes on 2026-08-13
+  between 20:20 and 20:25, TWO of them the packaged app and one npm start.
+  All three identical: EXC_BAD_ACCESS, SIGSEGV, KERN_INVALID_ADDRESS at
+  0xb8, faulting thread CrBrowserMain. 0xb8 is a null pointer plus a 184
+  byte field offset, the signature of reading a field off a null object.
+  One instance ran 2 minutes 25 seconds before dying, which is why short
+  test runs did not reproduce it.
+
+  The symbols in the .ips reports are nearest-symbol guesses inside a
+  stripped Electron Framework (ares_*, fontations_*, v8::BackingStore),
+  so the stack is NOT readable as written and should not be taken at face
+  value. What is reliable: the crash is in the browser/main process, not a
+  renderer.
+
+  Not reproduced since. Builds after that window have run far longer than
+  2:25 without incident, and no new .ips has appeared. Note that several
+  instances were running simultaneously during the crash window (a dist
+  build, the /Applications build, and npm start), each with its own Tray,
+  which is one thing that was true then and has not been true since.
+
+  Most likely suspects, in rough order, none confirmed:
+    1. Tray. All three died on the main thread, and Tray is main-process
+       native UI. Multiple concurrent instances each held a Tray
+    2. app.getFileIcon. Already proven to crash this exact Electron build
+       natively with size:'large'. It runs on hover, so it fires constantly
+    3. webContents.startDrag. Native drag session, main process, needs a
+       NativeImage
+    4. The fdfile:// protocol handler, which streams via net.fetch
+    5. fs.watch teardown. Watchers are closed on hide and on quit, and a
+       use-after-close would look exactly like this
+
+  Crash logging is now in place to learn more if it recurs, see below.
 
 - qlmanage was removed deliberately. spawn('qlmanage', ['-p', path]) is a
   developer binary, not a supported API. It opened a real Quick Look window

@@ -1,6 +1,6 @@
 const {
   app, BrowserWindow, Menu, Tray, screen, globalShortcut, ipcMain, nativeImage,
-  shell, clipboard, protocol, net
+  shell, clipboard, protocol, net, crashReporter
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -15,6 +15,61 @@ protocol.registerSchemesAsPrivileged([{
   scheme: PREVIEW_SCHEME,
   privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true }
 }]);
+
+// ── Crash logging ─────────────────────────────────────────
+// A SIGSEGV on CrBrowserMain kills the main process outright, so NO
+// JavaScript handler can observe it — not child-process-gone, not
+// render-process-gone, not uncaughtException. Three mechanisms are used
+// together:
+//   1. crashReporter writes a local minidump for main-process crashes.
+//   2. A breadcrumb log: every session writes 'start', and a clean exit
+//      writes 'clean-quit'. A 'start' with no matching 'clean-quit' is how
+//      an abrupt death is detected — on the NEXT launch.
+//   3. child-process-gone / render-process-gone for renderer and GPU
+//      crashes, which the main process does survive.
+// Must be started before the app is ready to catch early crashes.
+crashReporter.start({ uploadToServer: false });
+
+// A rolling breadcrumb, so a crash log says what the app was last doing
+// rather than only that it died.
+let lastAction = 'idle';
+
+function note(action) {
+  lastAction = action;
+}
+
+function crashLogFile() {
+  return path.join(app.getPath('userData'), 'crash.log');
+}
+
+function logEvent(line) {
+  try {
+    fs.appendFileSync(crashLogFile(), `${new Date().toISOString()}  ${line}\n`);
+  } catch (err) {
+    console.error(`[crash] could not write crash.log: ${err.message}`);
+  }
+}
+
+// Called at startup, before this session's 'start' line is written.
+function reportPreviousSession() {
+  let text = '';
+  try {
+    text = fs.readFileSync(crashLogFile(), 'utf8').trimEnd();
+  } catch (err) {
+    return; // first run
+  }
+  if (!text) return;
+
+  const last = text.split('\n').pop();
+  if (last.includes('  start ')) {
+    const message =
+      'PREVIOUS SESSION ENDED ABRUPTLY — no clean-quit line. Most likely a ' +
+      'native crash in the main process. Check ~/Library/Logs/DiagnosticReports ' +
+      `and ${app.getPath('crashDumps')}. Last action before it died: ${last}`;
+    logEvent(`!! ${message}`);
+    console.error(`[crash] ${message}`);
+  }
+}
 
 let win = null;
 let tray = null;
@@ -510,6 +565,7 @@ function watchDir(dirPath) {
 // have closed are unwatched here — that is what prevents leaks.
 ipcMain.on('watch:set', (event, paths) => {
   const wanted = new Set(Array.isArray(paths) ? paths : []);
+  note(`watch:set n=${wanted.size}`);
   for (const dirPath of [...watchers.keys()]) {
     if (!wanted.has(dirPath)) unwatchDir(dirPath);
   }
@@ -550,6 +606,7 @@ function getGenericDragIcon() {
 
 async function warmIcon(filePath) {
   if (iconCache.has(filePath)) return;
+  note(`getFileIcon ${path.basename(filePath)}`);
   try {
     const image = await app.getFileIcon(filePath, { size: FILE_ICON_SIZE });
     if (image.isEmpty()) return;
@@ -583,6 +640,7 @@ function isAllowedSync(filePath) {
 
 ipcMain.on('drag:start', (event, paths) => {
   if (!Array.isArray(paths) || paths.length === 0) return;
+  note(`drag:start n=${paths.length}`);
 
   const allowed = paths.filter(isAllowedSync);
   if (allowed.length !== paths.length) {
@@ -884,6 +942,7 @@ ipcMain.handle('meta:toggle-pin', async (event, filePath) => {
 // revalidated with symlinks resolved before anything is touched.
 
 async function trashPaths(paths) {
+  note(`trash n=${Array.isArray(paths) ? paths.length : 0}`);
   if (!Array.isArray(paths) || paths.length === 0) {
     return { ok: true, trashed: [], errors: [] };
   }
@@ -954,6 +1013,7 @@ async function uniqueDestination(destDir, name) {
 }
 
 async function copyInto(destDir, sourcePaths) {
+  note(`copyInto n=${sourcePaths.length}`);
   if (!isAllowedSync(destDir)) {
     console.error('[security] blocked copy to a destination outside all roots');
     return { ok: false, copied: 0, errors: ['That destination is outside Downloads and Desktop.'] };
@@ -1132,6 +1192,7 @@ const SIZE_SCAN_CAP = 20000;
 let sizeScanId = 0;
 
 async function folderSizeOnDisk(dir) {
+  note(`folderSize ${path.basename(dir)}`);
   let bytes = 0;
   let visited = 0;
   let approximate = false;
@@ -1451,6 +1512,7 @@ app.whenReady().then(() => {
   // preview:open — this handler is reachable from any renderer request, so it
   // cannot rely on the earlier check having happened.
   protocol.handle(PREVIEW_SCHEME, (request) => {
+    note('fdfile stream');
     let filePath;
     try {
       filePath = decodeURIComponent(new URL(request.url).pathname.replace(/^\//, ''));
@@ -1464,6 +1526,14 @@ app.whenReady().then(() => {
     return net.fetch(pathToFileURL(filePath).toString());
   });
 
+  // Order matters: report the previous session BEFORE writing this one's
+  // start line, or the check would always see its own.
+  reportPreviousSession();
+  logEvent(
+    `start pid=${process.pid} electron=${process.versions.electron} ` +
+    `version=${app.getVersion()} packaged=${app.isPackaged} dumps=${app.getPath('crashDumps')}`
+  );
+
   loadSettings();
   loadMetadata();
   createWindow();
@@ -1475,10 +1545,37 @@ app.whenReady().then(() => {
   win.once('ready-to-show', () => win.showInactive());
 });
 
+// Renderer and GPU crashes, which the main process DOES survive. These would
+// not have caught the CrBrowserMain SIGSEGV, but they cover the cases where
+// only a child dies — a blank panel or a dead preview window.
+app.on('render-process-gone', (event, webContents, details) => {
+  let which = 'unknown';
+  if (win && !win.isDestroyed() && webContents === win.webContents) which = 'panel';
+  else if (previewWin && !previewWin.isDestroyed() && webContents === previewWin.webContents) which = 'preview';
+  else if (prefsWin && !prefsWin.isDestroyed() && webContents === prefsWin.webContents) which = 'preferences';
+
+  logEvent(
+    `render-process-gone window=${which} reason=${details.reason} ` +
+    `exitCode=${details.exitCode} lastAction=${lastAction}`
+  );
+  console.error(`[crash] ${which} renderer gone: ${details.reason}`);
+});
+
+app.on('child-process-gone', (event, details) => {
+  logEvent(
+    `child-process-gone type=${details.type} reason=${details.reason} ` +
+    `exitCode=${details.exitCode} name=${details.name || ''} ` +
+    `service=${details.serviceName || ''} lastAction=${lastAction}`
+  );
+  console.error(`[crash] child process gone: ${details.type} — ${details.reason}`);
+});
+
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   // Leaked fs watchers hold file descriptors open.
   unwatchAll();
+  // The marker that distinguishes a clean exit from a crash on next launch.
+  logEvent(`clean-quit lastAction=${lastAction}`);
 });
 
 app.on('window-all-closed', () => {
