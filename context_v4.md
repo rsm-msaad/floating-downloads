@@ -187,13 +187,32 @@ catches.
 
 ## Queued work, all decided
 
-1. Live folder watching. Spec written, may not be run yet. The driving use
-   case: a file finishes downloading while the user is in a fullscreen app,
-   and it should appear without switching spaces
-2. Tags, notes, pins
-3. Tray left click toggles the panel, right click opens the menu.
+1. Live folder watching. The driving use case: a file finishes downloading
+   while the user is in a fullscreen app, and it should appear without
+   switching spaces
+2. Drop files in, copy, and paste. Spec written, all three decided:
+   - Drop files from Finder or any other app onto the panel to copy them
+     into the folder shown by the hovered column. ALWAYS a copy, never a
+     move, deliberately breaking the macOS same-volume convention. The
+     source file stays where it was
+   - Dropping onto a folder row targets that folder, not the column's
+     folder. The target highlights during the drag. Multiple files and
+     recursive folder copies must work
+   - Cmd+C copies the actual FILES to the clipboard, not their paths, so
+     Cmd+V works in Finder and other apps. This is distinct from the
+     existing Copy Path menu item, which stays as it is
+   - Cmd+V pastes clipboard files into the active column's folder. Always a
+     copy, consistent with drop-in
+   - Copy and Paste both join the context menu. Paste is disabled when the
+     clipboard holds no files
+   - Collisions never overwrite: append a numeric suffix Finder-style, so
+     report.pdf becomes "report 2.pdf"
+   - The DESTINATION must pass the allow list. Sources legitimately come
+     from outside the roots, which is expected and fine
+3. Tags, notes, pins
+4. Tray left click toggles the panel, right click opens the menu.
    Configurable hotkey
-4. Package as a .app: extend-info.plist, build script, app icon
+5. Package as a .app: extend-info.plist, build script, app icon
 
 ### Live watching requirements
 - Watch the active root and every open column, not just the root
