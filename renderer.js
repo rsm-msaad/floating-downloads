@@ -489,6 +489,23 @@ async function pasteIntoActiveColumn() {
   if (result.errors && result.errors.length > 0) showToast(result.errors);
 }
 
+// ── Move to Trash ─────────────────────────────────────────
+
+async function trashSelection() {
+  const paths = selectedPathsAcrossColumns();
+  if (paths.length === 0) return; // nothing selected: do nothing
+
+  // No confirmation. Trash is recoverable, and this matches Finder.
+  const result = await window.api.trashPaths(paths);
+
+  // The affected column arrives separately as a dir-changed update, which
+  // would drop these anyway; clearing here makes it explicit and immediate.
+  clearAllSelections();
+  syncSelectionClasses();
+
+  if (result.errors && result.errors.length > 0) showToast(result.errors);
+}
+
 function selectedPathsAcrossColumns() {
   for (const column of columns) {
     if (column.selected.size > 0) return [...column.selected];
@@ -683,9 +700,20 @@ async function refresh() {
   renderColumns();
 }
 
+// Every shortcut here is a bare key or a plain modifier combo, so any of them
+// would hijack typing. There is no text input yet, but tags and notes are
+// coming — guarding now rather than retrofitting later. Escape is exempt: it
+// should still dismiss things while a field has focus.
+function isTypingTarget(node) {
+  if (!node) return false;
+  if (node.isContentEditable) return true;
+  const tag = node.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
+
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
-    // Resolution order matters: Quick Look first, then step back a column,
+    // Resolution order matters: preview first, then step back a column,
     // then clear the selection.
     if (previewOpen) {
       closePreview();
@@ -694,6 +722,16 @@ document.addEventListener('keydown', (event) => {
     if (closeRightmostColumn()) return;
     clearAllSelections();
     syncSelectionClasses();
+    return;
+  }
+
+  if (isTypingTarget(event.target)) return;
+
+  // Must be tested BEFORE bare Backspace, which closes a column. On macOS the
+  // key labelled Delete reports as 'Backspace'; 'Delete' is forward-delete.
+  if (event.metaKey && (event.key === 'Backspace' || event.key === 'Delete')) {
+    event.preventDefault();
+    trashSelection();
     return;
   }
 
@@ -730,9 +768,6 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
-
-// Trashing from the context menu changes the listing under us.
-window.api.onFilesChanged(refresh);
 
 // The preview window can be closed from its own close button or by the panel
 // being hidden. This is a notification only — it changes no visibility here.

@@ -264,6 +264,12 @@ function getRoots() {
 // Returns the root containing realPath, or null. The separator matters:
 // without it, "/Users/x/DownloadsElsewhere" would pass a naive startsWith
 // check against "/Users/x/Downloads".
+// Is `child` the same path as `parent`, or beneath it? The separator guard
+// is the same one the root check relies on.
+function isInside(child, parent) {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
 function containingRoot(realPath) {
   return getRoots().find(
     (root) => realPath === root.path || realPath.startsWith(root.path + path.sep)
@@ -539,10 +545,6 @@ ipcMain.on('drag:start', (event, paths) => {
 // operation. The renderer supplies these paths, so they are not trusted —
 // least of all for Move to Trash.
 
-function notifyFilesChanged(webContents) {
-  if (webContents && !webContents.isDestroyed()) webContents.send('files-changed');
-}
-
 ipcMain.on('file:open', async (event, filePath) => {
   if (!isAllowedSync(filePath)) {
     console.error('[security] blocked open outside Downloads');
@@ -591,15 +593,12 @@ ipcMain.on('menu:show', (event, paths, destDir) => {
     {
       label: 'Move to Trash',
       // No confirmation: trashItem is recoverable from the Finder Trash.
+      // Shares one implementation with the Cmd+Delete shortcut.
       click: async () => {
-        for (const target of allowed) {
-          try {
-            await shell.trashItem(target);
-          } catch (err) {
-            console.error(`[trash] ${path.basename(target)}: ${err.message}`);
-          }
+        const result = await trashPaths(allowed);
+        if (result.errors.length > 0 && win && !win.isDestroyed()) {
+          win.webContents.send('operation-error', result.errors);
         }
-        notifyFilesChanged(event.sender);
       }
     }
   ]);
@@ -607,6 +606,56 @@ ipcMain.on('menu:show', (event, paths, destDir) => {
   menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
 });
 
+
+// ── Move to Trash ─────────────────────────────────────────
+// One implementation, shared by the context menu item and Cmd+Delete.
+// Destructive, so the allow list matters most here: every path is
+// revalidated with symlinks resolved before anything is touched.
+
+async function trashPaths(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return { ok: true, trashed: [], errors: [] };
+  }
+
+  const allowed = paths.filter(isAllowedSync);
+  if (allowed.length !== paths.length) {
+    console.error(`[security] blocked trashing ${paths.length - allowed.length} path(s) outside all roots`);
+  }
+
+  const errors = [];
+  const trashed = [];
+
+  for (const target of allowed) {
+    try {
+      await shell.trashItem(target);
+      trashed.push(target);
+    } catch (err) {
+      const reason = err.code === 'EACCES' ? 'permission denied'
+        : err.code === 'ENOENT' ? 'no longer exists'
+        : (err.code || err.message);
+      console.error(`[trash] ${path.basename(target)}: ${reason}`);
+      errors.push(`${path.basename(target)}: ${reason}`);
+    }
+  }
+
+  // A trashed file that is currently being previewed leaves the preview
+  // showing something that no longer exists.
+  if (previewPath && trashed.some((target) => target === previewPath || isInside(previewPath, target))) {
+    hidePreviewWindow();
+  }
+
+  // Update each affected column in place, so scroll position survives.
+  const parents = [...new Set(trashed.map((target) => path.dirname(target)))];
+  for (const parent of parents) {
+    if (!win || win.isDestroyed() || win.webContents.isDestroyed()) break;
+    const result = await readDirectory(parent);
+    win.webContents.send('dir-changed', { path: parent, result });
+  }
+
+  return { ok: errors.length === 0, trashed, errors };
+}
+
+ipcMain.handle('files:trash', (event, paths) => trashPaths(paths));
 
 // ── Copying files in ──────────────────────────────────────
 // Sources may legitimately come from anywhere — that is the point of a drop
@@ -861,6 +910,9 @@ async function buildPreviewInfo(filePath) {
 
 let previewWin = null;
 
+// What the preview is currently showing, so a trashed file can close it.
+let previewPath = null;
+
 // Recentred on every show and never persisted, matching Quick Look. Sized
 // against the display the panel is on, so it is independent of panel size.
 function previewWindowBounds() {
@@ -925,6 +977,7 @@ function hidePreviewWindow() {
   if (previewWin && !previewWin.isDestroyed() && previewWin.isVisible()) {
     previewWin.hide();
   }
+  previewPath = null;
   notifyPreviewClosed();
 }
 
@@ -934,6 +987,8 @@ ipcMain.on('preview:show', async (event, filePath) => {
     console.error(`[preview] cannot preview: ${info.code}`);
     return;
   }
+
+  previewPath = info.path;
 
   const target = ensurePreviewWindow();
   const send = () => {

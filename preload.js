@@ -47,9 +47,6 @@ contextBridge.exposeInMainWorld('api', {
   onPreviewClosed: (callback) => ipcRenderer.on('preview-closed', () => callback()),
   onPreviewStep: (callback) => ipcRenderer.on('preview-step', (_event, delta) => callback(delta)),
 
-  // Fires after files are trashed, so the list can refresh.
-  onFilesChanged: (callback) => ipcRenderer.on('files-changed', () => callback()),
-
   // Live watching. The panel declares which directories are open; the main
   // process reconciles its watchers against that list.
   setWatched: (paths) => ipcRenderer.send('watch:set', paths),
@@ -70,6 +67,9 @@ contextBridge.exposeInMainWorld('api', {
   copyFilesToClipboard: (paths) => ipcRenderer.send('clipboard:copy-files', paths),
   clipboardHasFiles: () => ipcRenderer.invoke('clipboard:has-files'),
   pasteInto: (destDir) => ipcRenderer.invoke('clipboard:paste', destDir),
+
+  // Move to Trash. Same main-process implementation as the context menu item.
+  trashPaths: (paths) => ipcRenderer.invoke('files:trash', paths),
 
   // Failures that must not be silent: permission denied, disk full, source gone.
   onOperationError: (callback) => ipcRenderer.on('operation-error', (_event, errors) => callback(errors))
