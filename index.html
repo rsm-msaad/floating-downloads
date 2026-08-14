@@ -222,6 +222,148 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* ── Metadata: tags, notes, pins ───────────────────────── */
+
+  /* The row becomes two lines ONLY when it has tags, so untagged rows are
+     unchanged and the list does not grow uniformly. */
+  .row { flex-wrap: wrap; }
+  .row-main {
+    flex: 1 1 100%;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+
+  /* Fixed 12px slots. Reserved always so names do not reflow as markers
+     appear, and cheap enough at 240px. */
+  .marker {
+    flex: 0 0 auto;
+    width: 12px; height: 12px;
+    display: grid; place-items: center;
+    border: 0; padding: 0;
+    background: transparent;
+    color: var(--faint);
+    cursor: default;
+    opacity: 0;
+    transition: opacity 120ms ease, color 120ms ease;
+  }
+  .marker svg { width: 10px; height: 10px; }
+
+  /* Note marker shows only when a note exists. */
+  .row.has-note .note-marker { opacity: 1; color: var(--muted); }
+  .note-marker:hover { color: var(--text); }
+
+  /* Pin shows when pinned, and on hover so unpinned rows have a target too. */
+  .row.is-pinned .pin-marker { opacity: 1; color: var(--accent); }
+  .row:hover .pin-marker { opacity: 1; }
+  .pin-marker:hover { color: var(--text); }
+
+  .row.is-pinned { background-color: var(--hover); }
+
+  /* Tag strip: second line, clipped rather than wrapped to a third. */
+  .tags {
+    flex: 1 1 100%;
+    min-width: 0;
+    display: flex;
+    flex-wrap: nowrap;
+    overflow: hidden;
+    gap: 4px;
+    padding-left: 23px; /* aligns under the filename, past the icon */
+    margin-top: 3px;
+  }
+
+  /* Styled after floating-todo's URGENT pill: rounded, filled, uppercase.
+     Colours are generated per tag name — the one place new colour values are
+     allowed — and kept low-saturation so they sit inside the HUD. */
+  .pill {
+    flex: 0 0 auto;
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-size: calc(9px * var(--scale));
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .pill.more { color: var(--faint); background: var(--hover); }
+
+  /* ── Popover ───────────────────────────────────────────── */
+
+  .popover {
+    position: absolute;
+    z-index: 10;
+    width: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--stroke);
+    border-radius: 10px;
+    background: var(--bg);
+    backdrop-filter: blur(28px) saturate(160%);
+  }
+
+  .popover-title {
+    font-size: calc(10px * var(--scale));
+    font-weight: 600;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .popover textarea,
+  .popover input {
+    width: 100%;
+    border: 1px solid var(--stroke);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: calc(12px * var(--scale));
+    padding: 6px 7px;
+    outline: none;
+    user-select: text;
+  }
+  .popover textarea {
+    min-height: 96px;
+    resize: none;
+    line-height: 1.45;
+  }
+  .popover textarea:focus,
+  .popover input:focus { border-color: var(--accent); }
+
+  .popover-hint {
+    font-size: calc(10px * var(--scale));
+    color: var(--faint);
+  }
+
+  /* Existing tags inside the tag popover, each removable. */
+  .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tag-chip {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 4px 1px 5px;
+    border-radius: 4px;
+    font-size: calc(9px * var(--scale));
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .tag-chip button {
+    border: 0; background: transparent; padding: 0;
+    color: inherit; font: inherit; opacity: 0.7;
+    cursor: default;
+  }
+  .tag-chip button:hover { opacity: 1; }
+
   /* ── Drop targets ──────────────────────────────────────── */
   /* Shown while files from another app are dragged over the panel, so it is
      obvious where they will land. Existing custom properties only. */
@@ -290,6 +432,7 @@
 
     <div id="columns"></div>
     <p class="message" id="message" hidden></p>
+    <div class="popover" id="popover" hidden></div>
     <div class="toast" id="toast" hidden></div>
   </div>
 

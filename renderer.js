@@ -5,6 +5,7 @@ const messageEl = document.getElementById('message');
 const countEl = document.getElementById('count');
 const tabsEl = document.getElementById('tabs');
 const toastEl = document.getElementById('toast');
+const popoverEl = document.getElementById('popover');
 
 // Static markup only — never interpolated with filenames.
 const FOLDER_SVG =
@@ -344,7 +345,40 @@ function buildRow(item, columnIndex, rowIndex) {
   date.className = 'date';
   date.textContent = formatDate(item.modified);
 
-  row.append(icon, name, date);
+  const noteMarker = markerButton('note-marker', NOTE_SVG, 'Note', (event) => {
+    event.stopPropagation();
+    openNotePopover(item.path, row);
+  });
+
+  const pinMarker = markerButton('pin-marker', PIN_SVG, item.pinned ? 'Unpin' : 'Pin', async (event) => {
+    event.stopPropagation();
+    await window.api.togglePin(item.path);
+  });
+
+  const main = document.createElement('div');
+  main.className = 'row-main';
+  main.append(icon, name, noteMarker, pinMarker, date);
+  row.append(main);
+
+  if (item.hasNote) row.classList.add('has-note');
+  if (item.pinned) row.classList.add('is-pinned');
+
+  // Tags get their own line, so they never compete with the filename for
+  // width. At most three pills plus a +N chip; the strip clips rather than
+  // wrapping to a third line.
+  if (item.tags && item.tags.length > 0) {
+    row.title = `${item.name}\nTags: ${item.tags.join(', ')}`;
+    const strip = document.createElement('div');
+    strip.className = 'tags';
+    for (const tag of item.tags.slice(0, MAX_VISIBLE_TAGS)) strip.append(buildPill(tag));
+    if (item.tags.length > MAX_VISIBLE_TAGS) {
+      const more = document.createElement('span');
+      more.className = 'pill more';
+      more.textContent = `+${item.tags.length - MAX_VISIBLE_TAGS}`;
+      strip.append(more);
+    }
+    row.append(strip);
+  }
 
   row.addEventListener('click', (event) => onRowClick(event, columnIndex, rowIndex));
   row.addEventListener('dblclick', () => onRowDoubleClick(columnIndex, rowIndex));
@@ -388,6 +422,203 @@ function buildColumn(columnIndex) {
   columnEl.append(fragment);
   return columnEl;
 }
+
+// ── Tags, notes, pins ─────────────────────────────────────
+
+const MAX_VISIBLE_TAGS = 3;
+
+const NOTE_SVG =
+  '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true">' +
+  '<path d="M2.5 3h7M2.5 6h7M2.5 9h4"/></svg>';
+
+const PIN_SVG =
+  '<svg viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">' +
+  '<path d="M7.2 1 11 4.8 9.6 6.2 9 5.6 6.9 7.7l-.3 2.2-1.1-1.1-2.4 2.4-.7-.7 2.4-2.4L3.7 7l2.2-.3L8 4.6l-.6-.6z"/></svg>';
+
+function markerButton(className, svg, label, onClick) {
+  const button = document.createElement('button');
+  button.className = `marker ${className}`;
+  button.innerHTML = svg; // static markup, never interpolated
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.addEventListener('click', onClick);
+  // A marker click must not start a file drag.
+  button.addEventListener('dragstart', (event) => event.preventDefault());
+  return button;
+}
+
+// A tag's colour is derived from its name, so the same tag is always the
+// same colour and the user never picks one. Low saturation and a mid
+// lightness keep it inside the HUD's register.
+function tagColor(tag) {
+  let hash = 0;
+  for (let i = 0; i < tag.length; i++) hash = (hash * 31 + tag.charCodeAt(i)) % 360;
+  return { fg: `hsl(${hash} 46% 70%)`, bg: `hsla(${hash}, 46%, 70%, 0.16)` };
+}
+
+function buildPill(tag) {
+  const pill = document.createElement('span');
+  pill.className = 'pill';
+  pill.textContent = tag;
+  const { fg, bg } = tagColor(tag);
+  pill.style.color = fg;
+  pill.style.backgroundColor = bg;
+  return pill;
+}
+
+// ── Popover ───────────────────────────────────────────────
+// One reused element, positioned near the row it belongs to.
+
+let popoverSave = null;
+
+function closePopover({ save = true } = {}) {
+  if (popoverEl.hidden) return;
+  const pending = popoverSave;
+  popoverSave = null;
+  popoverEl.hidden = true;
+  popoverEl.replaceChildren();
+  if (save && pending) pending();
+}
+
+function positionPopover(anchor) {
+  const panel = document.querySelector('.panel').getBoundingClientRect();
+  const box = anchor.getBoundingClientRect();
+  const width = 240;
+  let left = box.left - panel.left;
+  left = Math.max(8, Math.min(left, panel.width - width - 8));
+  let top = box.bottom - panel.top + 4;
+  // Flip above the row if there is not room below.
+  if (top + 160 > panel.height) top = Math.max(8, box.top - panel.top - 164);
+  popoverEl.style.left = `${left}px`;
+  popoverEl.style.top = `${top}px`;
+}
+
+function openPopover(anchor, title) {
+  closePopover();
+  popoverEl.replaceChildren();
+  const heading = document.createElement('p');
+  heading.className = 'popover-title';
+  heading.textContent = title;
+  popoverEl.append(heading);
+  popoverEl.hidden = false;
+  positionPopover(anchor);
+  return popoverEl;
+}
+
+function rowElementFor(filePath) {
+  return columnsEl.querySelector(`.row[data-path="${CSS.escape(filePath)}"]`);
+}
+
+async function openNotePopover(filePath, anchor) {
+  const target = anchor || rowElementFor(filePath);
+  if (!target) return;
+
+  const note = await window.api.getNote(filePath);
+  const popover = openPopover(target, 'Note');
+
+  const field = document.createElement('textarea');
+  field.value = note;
+  field.placeholder = 'Write a note…';
+  popover.append(field);
+
+  const hint = document.createElement('p');
+  hint.className = 'popover-hint';
+  hint.textContent = 'Saves when you close it. Escape closes.';
+  popover.append(hint);
+
+  // Saved on close or blur — no explicit save button.
+  popoverSave = () => window.api.setNote(filePath, field.value);
+  field.focus();
+}
+
+async function openTagPopover(filePath, anchor) {
+  const target = anchor || rowElementFor(filePath);
+  if (!target) return;
+
+  const popover = openPopover(target, 'Tags');
+  const known = await window.api.knownTags();
+
+  const list = document.createElement('div');
+  list.className = 'tag-list';
+  popover.append(list);
+
+  const item = findItemByPath(filePath);
+  const current = item && item.tags ? [...item.tags] : [];
+
+  for (const tag of current) {
+    const chip = document.createElement('span');
+    chip.className = 'tag-chip';
+    const { fg, bg } = tagColor(tag);
+    chip.style.color = fg;
+    chip.style.backgroundColor = bg;
+    chip.append(document.createTextNode(tag));
+    const remove = document.createElement('button');
+    remove.textContent = '×';
+    remove.title = `Remove ${tag}`;
+    remove.addEventListener('click', async () => {
+      await window.api.removeTag(filePath, tag);
+      closePopover({ save: false });
+    });
+    chip.append(remove);
+    list.append(chip);
+  }
+
+  const field = document.createElement('input');
+  field.type = 'text';
+  field.placeholder = 'Add a tag…';
+  field.setAttribute('list', 'known-tags');
+  popover.append(field);
+
+  // Every tag ever used is offered as a suggestion.
+  const datalist = document.createElement('datalist');
+  datalist.id = 'known-tags';
+  for (const tag of known) {
+    const option = document.createElement('option');
+    option.value = tag;
+    datalist.append(option);
+  }
+  popover.append(datalist);
+
+  const hint = document.createElement('p');
+  hint.className = 'popover-hint';
+  hint.textContent = 'Return adds. Escape closes.';
+  popover.append(hint);
+
+  field.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    const value = field.value.trim();
+    if (!value) return;
+    await window.api.addTag(filePath, value);
+    closePopover({ save: false });
+  });
+
+  field.focus();
+}
+
+function findItemByPath(filePath) {
+  for (const column of columns) {
+    const found = column.items.find((entry) => entry.path === filePath);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Keys typed inside the popover must never reach the document handler, or
+// Escape would close a column and Space would open a preview.
+popoverEl.addEventListener('keydown', (event) => {
+  event.stopPropagation();
+  if (event.key === 'Escape') closePopover(); // saves what was typed
+});
+
+// Clicking away closes and saves.
+document.addEventListener('mousedown', (event) => {
+  if (popoverEl.hidden) return;
+  if (!popoverEl.contains(event.target)) closePopover();
+});
+
+window.api.onOpenTagEditor((filePath) => openTagPopover(filePath));
+window.api.onOpenNoteEditor((filePath) => openNotePopover(filePath));
 
 // ── Errors ────────────────────────────────────────────────
 

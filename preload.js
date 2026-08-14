@@ -68,6 +68,19 @@ contextBridge.exposeInMainWorld('api', {
   clipboardHasFiles: () => ipcRenderer.invoke('clipboard:has-files'),
   pasteInto: (destDir) => ipcRenderer.invoke('clipboard:paste', destDir),
 
+  // Tags, notes and pins. One metadata layer keyed by absolute path.
+  knownTags: () => ipcRenderer.invoke('meta:known-tags'),
+  getNote: (filePath) => ipcRenderer.invoke('meta:note', filePath),
+  addTag: (filePath, tag) => ipcRenderer.invoke('meta:add-tag', filePath, tag),
+  removeTag: (filePath, tag) => ipcRenderer.invoke('meta:remove-tag', filePath, tag),
+  setNote: (filePath, note) => ipcRenderer.invoke('meta:set-note', filePath, note),
+  togglePin: (filePath) => ipcRenderer.invoke('meta:toggle-pin', filePath),
+
+  // The context menu cannot host a text field, so it asks the renderer to
+  // open the relevant popover.
+  onOpenTagEditor: (callback) => ipcRenderer.on('open-tag-editor', (_e, p) => callback(p)),
+  onOpenNoteEditor: (callback) => ipcRenderer.on('open-note-editor', (_e, p) => callback(p)),
+
   // Preferences window only.
   getPrefs: () => ipcRenderer.invoke('prefs:get'),
   setHotkey: (accelerator) => ipcRenderer.invoke('prefs:set-hotkey', accelerator),

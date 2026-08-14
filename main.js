@@ -390,16 +390,23 @@ async function readDirectory(requestedPath) {
         return null;
       }
     }
+    const meta = entryFor(fullPath);
     return {
       name: dirent.name,
       path: fullPath,
       isDirectory: stats.isDirectory(),
-      modified: stats.mtimeMs
+      modified: stats.mtimeMs,
+      tags: meta.tags,
+      pinned: meta.pinned,
+      // The note text itself is fetched on demand; a boolean is all the row
+      // needs, and shipping every note with every listing would be wasteful.
+      hasNote: meta.note.length > 0
     };
   }));
 
   const items = settled.filter(Boolean);
-  items.sort((a, b) => b.modified - a.modified);
+  // Pinned first, newest-first within each group.
+  items.sort((a, b) => (b.pinned === true) - (a.pinned === true) || b.modified - a.modified);
   return { ok: true, items, dir, isRoot: getRoots().some((root) => root.path === dir) };
 }
 
@@ -643,6 +650,30 @@ ipcMain.on('menu:show', (event, paths, destDir) => {
         }
       }
     },
+    { type: 'separator' },
+    {
+      label: 'Add Tag…',
+      // A native menu cannot host a text field, so the renderer opens its
+      // tag popover for the row instead.
+      click: () => event.sender.send('open-tag-editor', allowed[0])
+    },
+    {
+      label: entryFor(allowed[0]).note ? 'Edit Note…' : 'Add Note…',
+      click: () => event.sender.send('open-note-editor', allowed[0])
+    },
+    {
+      label: entryFor(allowed[0]).pinned ? 'Unpin' : 'Pin',
+      click: async () => {
+        // Multi-selection pins all of them, matching the clicked row's
+        // resulting state rather than toggling each independently.
+        const pin = !entryFor(allowed[0]).pinned;
+        for (const target of allowed) {
+          updateEntry(target, (draft) => { draft.pinned = pin; });
+        }
+        await notifyDirOf(allowed[0]);
+      }
+    },
+    { type: 'separator' },
     {
       label: 'Move to Trash',
       // No confirmation: trashItem is recoverable from the Finder Trash.
@@ -659,6 +690,136 @@ ipcMain.on('menu:show', (event, paths, destDir) => {
   menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
 });
 
+
+// ── Metadata: tags, notes, pins ───────────────────────────
+// One layer keyed by absolute path, in a single JSON file.
+//
+// Orphans are dropped on load, deliberately: metadata is keyed by path, so
+// renaming or moving a file loses its tags and note. That is the author's
+// decision, made knowingly (context_v4.md). There is no path-following or
+// recovery logic here on purpose — do not add any.
+
+let metadata = { version: 1, entries: {}, knownTags: [] };
+
+function metadataFile() {
+  return path.join(app.getPath('userData'), 'metadata.json');
+}
+
+function isEmptyEntry(entry) {
+  return (!entry.tags || entry.tags.length === 0) && !entry.note && !entry.pinned;
+}
+
+function loadMetadata() {
+  const loaded = readJson(metadataFile(), { version: 1, entries: {}, knownTags: [] });
+  const entries = {};
+  let pruned = 0;
+
+  // Prune here rather than scanning constantly.
+  for (const [filePath, entry] of Object.entries(loaded.entries || {})) {
+    if (!entry || isEmptyEntry(entry)) continue;
+    if (!fs.existsSync(filePath)) { pruned++; continue; }
+    entries[filePath] = {
+      tags: Array.isArray(entry.tags) ? entry.tags : [],
+      note: typeof entry.note === 'string' ? entry.note : '',
+      pinned: entry.pinned === true
+    };
+  }
+
+  metadata = {
+    version: 1,
+    entries,
+    // Every tag ever used is remembered, even once no file carries it.
+    knownTags: Array.isArray(loaded.knownTags) ? loaded.knownTags : []
+  };
+
+  if (pruned > 0) {
+    console.log(`[metadata] pruned ${pruned} orphaned entr${pruned === 1 ? 'y' : 'ies'}`);
+    saveMetadata();
+  }
+}
+
+function saveMetadata() {
+  writeJsonAtomic(metadataFile(), metadata);
+}
+
+function entryFor(filePath) {
+  return metadata.entries[filePath] || { tags: [], note: '', pinned: false };
+}
+
+function updateEntry(filePath, mutate) {
+  const entry = { ...entryFor(filePath) };
+  entry.tags = [...entry.tags];
+  mutate(entry);
+
+  if (isEmptyEntry(entry)) delete metadata.entries[filePath];
+  else metadata.entries[filePath] = entry;
+
+  saveMetadata();
+  return entry;
+}
+
+// Tell the renderer to redraw the row's column.
+async function notifyDirOf(filePath) {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return;
+  const parent = path.dirname(filePath);
+  const result = await readDirectory(parent);
+  win.webContents.send('dir-changed', { path: parent, result });
+}
+
+function guardPath(filePath) {
+  if (typeof filePath === 'string' && filePath && isAllowedSync(filePath)) return true;
+  console.error('[security] blocked metadata write for a path outside all roots');
+  return false;
+}
+
+ipcMain.handle('meta:known-tags', () => metadata.knownTags);
+
+ipcMain.handle('meta:note', (event, filePath) => {
+  if (!guardPath(filePath)) return '';
+  return entryFor(filePath).note;
+});
+
+ipcMain.handle('meta:add-tag', async (event, filePath, tag) => {
+  if (!guardPath(filePath)) return null;
+  const label = String(tag || '').trim();
+  if (!label) return entryFor(filePath);
+
+  const entry = updateEntry(filePath, (draft) => {
+    if (!draft.tags.some((t) => t.toLowerCase() === label.toLowerCase())) draft.tags.push(label);
+  });
+
+  if (!metadata.knownTags.some((t) => t.toLowerCase() === label.toLowerCase())) {
+    metadata.knownTags.push(label);
+    metadata.knownTags.sort((a, b) => a.localeCompare(b));
+    saveMetadata();
+  }
+
+  await notifyDirOf(filePath);
+  return entry;
+});
+
+ipcMain.handle('meta:remove-tag', async (event, filePath, tag) => {
+  if (!guardPath(filePath)) return null;
+  const entry = updateEntry(filePath, (draft) => {
+    draft.tags = draft.tags.filter((t) => t.toLowerCase() !== String(tag).toLowerCase());
+  });
+  await notifyDirOf(filePath);
+  return entry;
+});
+
+ipcMain.handle('meta:set-note', async (event, filePath, note) => {
+  if (!guardPath(filePath)) return null;
+  const entry = updateEntry(filePath, (draft) => { draft.note = String(note || ''); });
+  await notifyDirOf(filePath);
+  return entry;
+});
+
+ipcMain.handle('meta:toggle-pin', async (event, filePath) => {
+  if (!guardPath(filePath)) return null;
+  const entry = updateEntry(filePath, (draft) => { draft.pinned = !draft.pinned; });
+  await notifyDirOf(filePath);
+  return entry;
+});
 
 // ── Move to Trash ─────────────────────────────────────────
 // One implementation, shared by the context menu item and Cmd+Delete.
@@ -1158,6 +1319,7 @@ app.whenReady().then(() => {
   });
 
   loadSettings();
+  loadMetadata();
   createWindow();
   createTray();
   registerHotkey();
