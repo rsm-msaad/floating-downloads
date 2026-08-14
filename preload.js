@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 // contextIsolation is on and nodeIntegration is off, so the renderer sees
 // only what is listed here. No fs, no path, no ipcRenderer itself — just
@@ -31,7 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   openFile: (filePath) => ipcRenderer.send('file:open', filePath),
 
   // Native context menu, built and popped up in the main process.
-  showContextMenu: (paths) => ipcRenderer.send('menu:show', paths),
+  showContextMenu: (paths, destDir) => ipcRenderer.send('menu:show', paths, destDir),
 
   // Preview lives in its own floating window. The panel asks for a file to be
   // previewed; the preview window renders whatever it is handed. File
@@ -55,5 +55,22 @@ contextBridge.exposeInMainWorld('api', {
   setWatched: (paths) => ipcRenderer.send('watch:set', paths),
 
   // Delivers only the changed directory's contents, never the whole trail.
-  onDirChanged: (callback) => ipcRenderer.on('dir-changed', (_event, payload) => callback(payload))
+  onDirChanged: (callback) => ipcRenderer.on('dir-changed', (_event, payload) => callback(payload)),
+
+  // Resolve a dropped File object to a real path. The Electron 32 API that
+  // replaced the removed File.path property; it must be called from preload.
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+
+  // Copy files into a destination folder. Sources may be anywhere; the
+  // DESTINATION is validated against the allow list in the main process.
+  copyInto: (destDir, sourcePaths) => ipcRenderer.invoke('files:copy-into', destDir, sourcePaths),
+
+  // The actual files on the clipboard, so Cmd+V works in Finder. Distinct
+  // from the Copy Path menu item, which copies text.
+  copyFilesToClipboard: (paths) => ipcRenderer.send('clipboard:copy-files', paths),
+  clipboardHasFiles: () => ipcRenderer.invoke('clipboard:has-files'),
+  pasteInto: (destDir) => ipcRenderer.invoke('clipboard:paste', destDir),
+
+  // Failures that must not be silent: permission denied, disk full, source gone.
+  onOperationError: (callback) => ipcRenderer.on('operation-error', (_event, errors) => callback(errors))
 });

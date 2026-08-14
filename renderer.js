@@ -4,6 +4,7 @@ const columnsEl = document.getElementById('columns');
 const messageEl = document.getElementById('message');
 const countEl = document.getElementById('count');
 const tabsEl = document.getElementById('tabs');
+const toastEl = document.getElementById('toast');
 
 // Static markup only — never interpolated with filenames.
 const FOLDER_SVG =
@@ -222,7 +223,7 @@ function onRowContextMenu(event, columnIndex, rowIndex) {
   // right-clicking outside selects that row first.
   if (!column.selected.has(item.path)) selectSingle(columnIndex, rowIndex);
 
-  window.api.showContextMenu([...column.selected]);
+  window.api.showContextMenu([...column.selected], column.path);
 }
 
 // ── Preview ──────────────────────────────────────────────
@@ -362,6 +363,8 @@ function buildColumn(columnIndex) {
   columnEl.className = 'column';
   columnEl.dataset.index = String(columnIndex);
 
+  attachDropHandlers(columnEl, columnIndex);
+
   // Clicking a column's own padding, rather than a row, clears the selection.
   columnEl.addEventListener('click', (event) => {
     if (event.target === columnEl) {
@@ -384,6 +387,113 @@ function buildColumn(columnIndex) {
   });
   columnEl.append(fragment);
   return columnEl;
+}
+
+// ── Errors ────────────────────────────────────────────────
+
+let toastTimer = null;
+
+// Copy failures must be visible. Permission denied, disk full and a
+// vanished source all surface here rather than being swallowed.
+function showToast(lines) {
+  const text = Array.isArray(lines) ? lines.join('\n') : String(lines);
+  if (!text) return;
+  toastEl.textContent = text;
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.hidden = true; }, 6000);
+}
+
+// ── Drop in ───────────────────────────────────────────────
+// Incoming drags from other apps. This is ordinary HTML5 drag and drop,
+// which is fine for RECEIVING files — the restriction is the other way
+// round: HTML5 cannot SEND a file to another macOS app, which is why
+// dragging out uses webContents.startDrag instead.
+//
+// Dragging a row out never reaches these handlers: onRowDragStart calls
+// preventDefault, so no HTML5 drag session is created and the native drag
+// generates no DOM drag events.
+
+function dragCarriesFiles(event) {
+  return Array.from(event.dataTransfer.types || []).includes('Files');
+}
+
+// A folder row under the cursor wins over its column, so a drop lands in the
+// folder rather than beside it.
+function dropTargetFor(columnIndex, node) {
+  const row = node && node.closest ? node.closest('.row.is-dir') : null;
+  if (row && row.dataset.path) return { dir: row.dataset.path, el: row };
+  return { dir: columns[columnIndex].path, el: columnsEl.children[columnIndex] };
+}
+
+function clearDropHighlight() {
+  for (const el of columnsEl.querySelectorAll('.drop-target')) {
+    el.classList.remove('drop-target');
+  }
+}
+
+function attachDropHandlers(columnEl, columnIndex) {
+  // Nested children fire dragleave constantly, so highlight state is driven
+  // from dragover, which fires continuously with an accurate target.
+  columnEl.addEventListener('dragover', (event) => {
+    if (!dragCarriesFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy'; // always a copy, never a move
+    const target = dropTargetFor(columnIndex, event.target);
+    if (!target.el || target.el.classList.contains('drop-target')) return;
+    clearDropHighlight();
+    target.el.classList.add('drop-target');
+  });
+
+  columnEl.addEventListener('dragleave', (event) => {
+    // Only clear when the cursor has actually left the column.
+    if (event.relatedTarget && columnEl.contains(event.relatedTarget)) return;
+    clearDropHighlight();
+  });
+
+  columnEl.addEventListener('drop', async (event) => {
+    if (!dragCarriesFiles(event)) return;
+    event.preventDefault();
+    clearDropHighlight();
+
+    const target = dropTargetFor(columnIndex, event.target);
+    const sources = Array.from(event.dataTransfer.files)
+      .map((file) => window.api.getPathForFile(file))
+      .filter(Boolean);
+    if (sources.length === 0) return;
+
+    const result = await window.api.copyInto(target.dir, sources);
+    if (result.errors && result.errors.length > 0) showToast(result.errors);
+  });
+}
+
+// ── Clipboard ─────────────────────────────────────────────
+
+// The folder a paste lands in: the column holding the selection, falling
+// back to the rightmost column.
+function activeColumn() {
+  const withSelection = columns.find((column) => column.selected.size > 0);
+  return withSelection || columns[columns.length - 1] || null;
+}
+
+function copySelectionToClipboard() {
+  const paths = selectedPathsAcrossColumns();
+  if (paths.length === 0) return;
+  window.api.copyFilesToClipboard(paths);
+}
+
+async function pasteIntoActiveColumn() {
+  const column = activeColumn();
+  if (!column) return;
+  const result = await window.api.pasteInto(column.path);
+  if (result.errors && result.errors.length > 0) showToast(result.errors);
+}
+
+function selectedPathsAcrossColumns() {
+  for (const column of columns) {
+    if (column.selected.size > 0) return [...column.selected];
+  }
+  return [];
 }
 
 // ── Live updates ──────────────────────────────────────────
@@ -593,6 +703,18 @@ document.addEventListener('keydown', (event) => {
     return;
   }
 
+  if (event.metaKey && (event.key === 'c' || event.key === 'C')) {
+    event.preventDefault();
+    copySelectionToClipboard();
+    return;
+  }
+
+  if (event.metaKey && (event.key === 'v' || event.key === 'V')) {
+    event.preventDefault();
+    pasteIntoActiveColumn();
+    return;
+  }
+
   if (event.key === ' ') {
     // Otherwise Space scrolls the column.
     event.preventDefault();
@@ -625,6 +747,10 @@ window.api.onPreviewStep(stepPreview);
 
 // A watched directory changed. Only that column's contents arrive.
 window.api.onDirChanged(applyDirChange);
+
+// Failures from operations started in the main process, such as a Paste
+// driven from the context menu.
+window.api.onOperationError(showToast);
 
 async function init() {
   try {

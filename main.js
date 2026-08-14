@@ -4,7 +4,7 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { pathToFileURL } = require('url');
+const { pathToFileURL, fileURLToPath } = require('url');
 
 // Media and PDF previews stream through this scheme instead of being base64'd
 // over IPC, which would mean holding an entire video in memory twice. It must
@@ -553,11 +553,11 @@ ipcMain.on('file:open', async (event, filePath) => {
   if (problem) console.error(`[open] ${path.basename(filePath)}: ${problem}`);
 });
 
-ipcMain.on('menu:show', (event, paths) => {
+ipcMain.on('menu:show', (event, paths, destDir) => {
   if (!Array.isArray(paths)) return;
   const allowed = paths.filter(isAllowedSync);
   if (allowed.length !== paths.length) {
-    console.error(`[security] blocked menu for ${paths.length - allowed.length} path(s) outside Downloads`);
+    console.error(`[security] blocked menu for ${paths.length - allowed.length} path(s) outside all roots`);
   }
   if (allowed.length === 0) return;
 
@@ -568,9 +568,25 @@ ipcMain.on('menu:show', (event, paths) => {
       click: () => shell.showItemInFolder(allowed[0])
     },
     {
+      label: 'Copy',
+      // The files themselves, so Cmd+V works in Finder. Distinct from
+      // Copy Path below, which copies text.
+      click: () => writeFilesToClipboard(allowed)
+    },
+    {
       label: 'Copy Path',
       // One full POSIX path per line for a multi-selection.
       click: () => clipboard.writeText(allowed.join('\n'))
+    },
+    {
+      label: 'Paste',
+      enabled: readFilesFromClipboard().length > 0 && !!destDir && isAllowedSync(destDir),
+      click: async () => {
+        const result = await copyInto(destDir, readFilesFromClipboard());
+        if (result.errors.length > 0 && win && !win.isDestroyed()) {
+          win.webContents.send('operation-error', result.errors);
+        }
+      }
     },
     {
       label: 'Move to Trash',
@@ -591,6 +607,156 @@ ipcMain.on('menu:show', (event, paths) => {
   menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
 });
 
+
+// ── Copying files in ──────────────────────────────────────
+// Sources may legitimately come from anywhere — that is the point of a drop
+// from Finder. The DESTINATION is what must be inside a root, and it is
+// validated before any write.
+
+// Finder-style collision handling: report.pdf -> "report 2.pdf". Never
+// overwrite.
+async function uniqueDestination(destDir, name) {
+  const ext = path.extname(name);
+  const base = path.basename(name, ext);
+  let candidate = name;
+  let counter = 1;
+
+  for (;;) {
+    const full = path.join(destDir, candidate);
+    try {
+      await fs.promises.access(full);
+    } catch (err) {
+      return full; // nothing there: this name is free
+    }
+    counter++;
+    candidate = `${base} ${counter}${ext}`;
+  }
+}
+
+async function copyInto(destDir, sourcePaths) {
+  if (!isAllowedSync(destDir)) {
+    console.error('[security] blocked copy to a destination outside all roots');
+    return { ok: false, copied: 0, errors: ['That destination is outside Downloads and Desktop.'] };
+  }
+
+  let realDest;
+  try {
+    realDest = await fs.promises.realpath(destDir);
+  } catch (err) {
+    return { ok: false, copied: 0, errors: [`Destination unavailable (${err.code || 'UNKNOWN'}).`] };
+  }
+
+  const errors = [];
+  let copied = 0;
+
+  for (const source of sourcePaths) {
+    if (typeof source !== 'string' || !source) continue;
+    const name = path.basename(source);
+    try {
+      const target = await uniqueDestination(realDest, name);
+      // recursive:true so dropping a folder copies its whole tree. Async
+      // throughout, so a large copy never blocks the UI.
+      await fs.promises.cp(source, target, { recursive: true, force: false, errorOnExist: true });
+      copied++;
+    } catch (err) {
+      const reason = err.code === 'EACCES' ? 'permission denied'
+        : err.code === 'ENOSPC' ? 'disk full'
+        : err.code === 'ENOENT' ? 'source no longer exists'
+        : (err.code || err.message);
+      console.error(`[copy] ${name}: ${reason}`);
+      errors.push(`${name}: ${reason}`);
+    }
+  }
+
+  // Push the destination's new contents so an open column updates in place,
+  // keeping its scroll position and selection.
+  if (copied > 0 && win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    const result = await readDirectory(realDest);
+    win.webContents.send('dir-changed', { path: realDest, result });
+  }
+
+  return { ok: errors.length === 0, copied, errors };
+}
+
+ipcMain.handle('files:copy-into', (event, destDir, sourcePaths) => {
+  if (!Array.isArray(sourcePaths)) return { ok: false, copied: 0, errors: ['Nothing to copy.'] };
+  return copyInto(destDir, sourcePaths);
+});
+
+// ── Clipboard ─────────────────────────────────────────────
+// Electron's clipboard has no file-list API. On macOS the pasteboard carries
+// file lists as NSFilenamesPboardType, whose payload is an XML plist array of
+// POSIX paths, so it is written and read as a raw buffer.
+
+const FILE_LIST_FORMAT = 'NSFilenamesPboardType';
+
+function escapeXml(value) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function unescapeXml(value) {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function writeFilesToClipboard(paths) {
+  const entries = paths.map((p) => `<string>${escapeXml(p)}</string>`).join('');
+  const plist =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" ' +
+    '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n' +
+    `<plist version="1.0"><array>${entries}</array></plist>`;
+  clipboard.writeBuffer(FILE_LIST_FORMAT, Buffer.from(plist, 'utf8'));
+}
+
+function readFilesFromClipboard() {
+  const buffer = clipboard.readBuffer(FILE_LIST_FORMAT);
+  if (buffer && buffer.length > 0) {
+    const xml = buffer.toString('utf8');
+    const paths = [];
+    const pattern = /<string>([\s\S]*?)<\/string>/g;
+    let match = pattern.exec(xml);
+    while (match) {
+      paths.push(unescapeXml(match[1]));
+      match = pattern.exec(xml);
+    }
+    if (paths.length > 0) return paths;
+  }
+
+  // Newer macOS writes public.file-url for a single file, so fall back to it
+  // rather than reporting an empty clipboard.
+  try {
+    const fileUrl = clipboard.read('public.file-url');
+    if (fileUrl) return [fileURLToPath(fileUrl.trim())];
+  } catch (err) {
+    // Not a file URL.
+  }
+  return [];
+}
+
+ipcMain.on('clipboard:copy-files', (event, paths) => {
+  if (!Array.isArray(paths)) return;
+  const allowed = paths.filter(isAllowedSync);
+  if (allowed.length !== paths.length) {
+    console.error('[security] blocked clipboard copy of paths outside all roots');
+  }
+  if (allowed.length === 0) return;
+  writeFilesToClipboard(allowed);
+});
+
+ipcMain.handle('clipboard:has-files', () => readFilesFromClipboard().length > 0);
+
+ipcMain.handle('clipboard:paste', async (event, destDir) => {
+  const sources = readFilesFromClipboard();
+  if (sources.length === 0) return { ok: true, copied: 0, errors: [] };
+  // Paste is always a copy, consistent with drop-in.
+  return copyInto(destDir, sources);
+});
 
 // ── Preview ───────────────────────────────────────────────
 // Replaces Quick Look. qlmanage opened a real macOS window on another

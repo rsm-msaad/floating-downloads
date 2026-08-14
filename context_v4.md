@@ -14,7 +14,7 @@ can be dragged straight out of the panel into whatever app is currently in
 focus. Same shortcut hides it.
 
 ## Repo
-github.com/rsm-msaad/floating-downloads, private.
+github.com/rsm-msaad/floating-downloads, public. Deliberately public.
 Local path: ~/Desktop/Test 1/floating_downloads
 
 ## Reference implementation, and a note for anyone new
