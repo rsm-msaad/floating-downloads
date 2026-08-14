@@ -1,10 +1,20 @@
 const {
   app, BrowserWindow, Menu, Tray, screen, globalShortcut, ipcMain, nativeImage,
-  shell, clipboard
+  shell, clipboard, protocol, net
 } = require('electron');
-const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
+
+// Media and PDF previews stream through this scheme instead of being base64'd
+// over IPC, which would mean holding an entire video in memory twice. It must
+// be declared privileged BEFORE the app is ready, and `stream: true` is what
+// makes range requests work — without it, video seeking breaks.
+const PREVIEW_SCHEME = 'fdfile';
+protocol.registerSchemesAsPrivileged([{
+  scheme: PREVIEW_SCHEME,
+  privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true }
+}]);
 
 let win = null;
 let tray = null;
@@ -108,7 +118,10 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // Chromium's built-in PDF viewer is a plugin; without this an embedded
+      // PDF renders as a blank frame.
+      plugins: true
     }
   });
 
@@ -140,6 +153,10 @@ function showPanel() {
 function hidePanel() {
   if (!win || win.isDestroyed()) return;
   win.hide();
+  // One-directional by design: hiding the panel hides the preview, but
+  // showing the panel does NOT bring the preview back, and nothing the
+  // preview does affects the panel. See the preview window section.
+  hidePreviewWindow();
 }
 
 function togglePanel() {
@@ -473,58 +490,205 @@ ipcMain.on('menu:show', (event, paths) => {
   menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
 });
 
-// ── Quick Look ────────────────────────────────────────────
-// qlmanage is a developer binary, not a supported API. It cannot be
-// dismissed programmatically, so the only way to close the panel is to kill
-// the child process — hence the tracking below. stdio is ignored because it
-// writes warnings to stderr. See context_v2.md, "Known gotchas".
 
-let quickLookProcess = null;
+// ── Preview ───────────────────────────────────────────────
+// Replaces Quick Look. qlmanage opened a real macOS window on another
+// screen and stole focus, which defeats the point of a floating overlay.
 
-function dismissQuickLook() {
-  if (!quickLookProcess) return;
-  try {
-    quickLookProcess.kill();
-  } catch (err) {
-    // Already gone.
-  }
-  quickLookProcess = null;
+const TEXT_PREVIEW_BYTES = 100 * 1024;
+
+const PREVIEW_KINDS = [
+  ['image', ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp']],
+  ['pdf', ['pdf']],
+  ['video', ['mp4', 'mov', 'webm']],
+  ['audio', ['mp3', 'wav', 'm4a']],
+  ['text', ['txt', 'md', 'csv', 'json', 'js', 'ts', 'py', 'html', 'css', 'yml', 'yaml', 'log']]
+];
+
+function previewKind(filePath) {
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  const match = PREVIEW_KINDS.find(([, exts]) => exts.includes(ext));
+  return { kind: match ? match[0] : 'other', ext };
 }
 
-ipcMain.on('ql:preview', (event, paths) => {
-  if (!Array.isArray(paths)) return;
-  const allowed = paths.filter(isAllowedSync);
-  if (allowed.length === 0) return;
+// The renderer never touches the filesystem, so it gets a URL for streamable
+// content rather than a path.
+function previewUrl(filePath) {
+  return `${PREVIEW_SCHEME}://local/${encodeURIComponent(filePath)}`;
+}
 
-  dismissQuickLook();
-
+// Read only the head of the file. This is the guard against rendering a
+// 200MB log: the size on disk is irrelevant because at most 100KB is read.
+async function readTextHead(filePath, size) {
+  const length = Math.min(size, TEXT_PREVIEW_BYTES);
+  const handle = await fs.promises.open(filePath, 'r');
   try {
-    quickLookProcess = spawn('qlmanage', ['-p', ...allowed], { stdio: 'ignore' });
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, 0);
+    return { text: buffer.subarray(0, bytesRead).toString('utf8'), truncated: size > bytesRead };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function buildPreviewInfo(filePath) {
+  if (!isAllowedSync(filePath)) {
+    console.error('[security] blocked preview outside all roots');
+    return { ok: false, code: 'EOUTSIDE' };
+  }
+
+  let stats;
+  try {
+    stats = await fs.promises.stat(filePath);
   } catch (err) {
-    console.error(`[quicklook] could not start qlmanage: ${err.message}`);
-    quickLookProcess = null;
+    return { ok: false, code: err.code || 'UNKNOWN' };
+  }
+  if (stats.isDirectory()) return { ok: false, code: 'EISDIR' };
+
+  const { kind, ext } = previewKind(filePath);
+  const base = {
+    ok: true,
+    kind,
+    ext,
+    name: path.basename(filePath),
+    path: filePath,
+    size: stats.size,
+    modified: stats.mtimeMs
+  };
+
+  if (kind === 'text') {
+    try {
+      return { ...base, ...(await readTextHead(filePath, stats.size)) };
+    } catch (err) {
+      console.error(`[preview] cannot read ${base.name}: ${err.message}`);
+      return { ...base, kind: 'other' };
+    }
+  }
+
+  if (kind === 'other') {
+    // Fall back to the real macOS icon. 'normal' deliberately, not 'large':
+    // 'large' is a native NOTREACHED crash on Electron 32.3.3.
+    try {
+      const icon = await app.getFileIcon(filePath, { size: FILE_ICON_SIZE });
+      return { ...base, iconDataUrl: icon.isEmpty() ? null : icon.toDataURL() };
+    } catch (err) {
+      return { ...base, iconDataUrl: null };
+    }
+  }
+
+  return { ...base, url: previewUrl(filePath) };
+}
+
+// ── Preview window ────────────────────────────────────────
+// A separate floating window, like Quick Look — not an overlay inside the
+// panel. State is deliberately one-directional: the panel renderer owns the
+// column/selection state and decides what to preview; this window only
+// renders what it is given and forwards intent back.
+//
+// context_v3.md flags the reference app's two-window visibility coupling,
+// where each window implicitly manages the other's visibility. That is NOT
+// reproduced here:
+//   - opening the preview never touches the panel
+//   - closing the preview never shows the panel
+//   - hiding the panel DOES hide the preview (one way only)
+
+let previewWin = null;
+
+// Recentred on every show and never persisted, matching Quick Look. Sized
+// against the display the panel is on, so it is independent of panel size.
+function previewWindowBounds() {
+  const display = win && !win.isDestroyed()
+    ? screen.getDisplayMatching(win.getBounds())
+    : screen.getPrimaryDisplay();
+  const area = display.workArea;
+  const width = Math.round(area.width * 0.6);
+  const height = Math.round(area.height * 0.6);
+  return {
+    width,
+    height,
+    x: Math.round(area.x + (area.width - width) / 2),
+    y: Math.round(area.y + (area.height - height) / 2)
+  };
+}
+
+// One window, reused: shown, hidden and reloaded rather than recreated.
+function ensurePreviewWindow() {
+  if (previewWin && !previewWin.isDestroyed()) return previewWin;
+
+  previewWin = new BrowserWindow({
+    ...previewWindowBounds(),
+    minWidth: 320,
+    minHeight: 240,
+    // Same treatment as the main panel.
+    frame: false,
+    transparent: true,
+    hasShadow: true,
+    resizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    show: false,
+    acceptFirstMouse: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      plugins: true
+    }
+  });
+
+  previewWin.loadFile(path.join(__dirname, 'preview.html'));
+  previewWin.setAlwaysOnTop(true, 'floating');
+  previewWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  previewWin.on('closed', () => { previewWin = null; });
+
+  return previewWin;
+}
+
+// Tell the panel the preview is gone so its belief stays in sync. This is a
+// notification, not the reverse coupling: it changes no window's visibility.
+function notifyPreviewClosed() {
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send('preview-closed');
+  }
+}
+
+function hidePreviewWindow() {
+  if (previewWin && !previewWin.isDestroyed() && previewWin.isVisible()) {
+    previewWin.hide();
+  }
+  notifyPreviewClosed();
+}
+
+ipcMain.on('preview:show', async (event, filePath) => {
+  const info = await buildPreviewInfo(filePath);
+  if (!info.ok) {
+    console.error(`[preview] cannot preview: ${info.code}`);
     return;
   }
 
-  quickLookProcess.on('error', (err) => {
-    console.error(`[quicklook] qlmanage failed: ${err.message}`);
-    quickLookProcess = null;
-    notifyQuickLookClosed(event.sender);
-  });
+  const target = ensurePreviewWindow();
+  const send = () => {
+    if (!target.isDestroyed()) target.webContents.send('preview-data', info);
+  };
+  if (target.webContents.isLoading()) target.webContents.once('did-finish-load', send);
+  else send();
 
-  // Closing the panel any other way must not leave the renderer thinking it
-  // is still open, or the next Space would try to dismiss nothing.
-  quickLookProcess.on('exit', () => {
-    quickLookProcess = null;
-    notifyQuickLookClosed(event.sender);
-  });
+  target.setBounds(previewWindowBounds());
+  // Never show() + focus(): the preview must not steal focus either.
+  target.showInactive();
 });
 
-function notifyQuickLookClosed(webContents) {
-  if (webContents && !webContents.isDestroyed()) webContents.send('ql-closed');
-}
+ipcMain.on('preview:close', () => hidePreviewWindow());
 
-ipcMain.on('ql:dismiss', () => dismissQuickLook());
+// Arrow keys can be pressed in either window, but only the panel knows the
+// column contents, so stepping is always resolved there.
+ipcMain.on('preview:step', (event, delta) => {
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send('preview-step', delta);
+  }
+});
 
 // ── Lifecycle ─────────────────────────────────────────────
 
@@ -534,6 +698,23 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock) {
     app.dock.hide();
   }
+
+  // Serve preview media. The path is re-validated here as well as in
+  // preview:open — this handler is reachable from any renderer request, so it
+  // cannot rely on the earlier check having happened.
+  protocol.handle(PREVIEW_SCHEME, (request) => {
+    let filePath;
+    try {
+      filePath = decodeURIComponent(new URL(request.url).pathname.replace(/^\//, ''));
+    } catch (err) {
+      return new Response('Bad request', { status: 400 });
+    }
+    if (!isAllowedSync(filePath)) {
+      console.error('[security] blocked preview stream outside all roots');
+      return new Response('Forbidden', { status: 403 });
+    }
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
 
   loadSettings();
   createWindow();
@@ -547,15 +728,7 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
-  // qlmanage is a detached child; without this a Quick Look panel would
-  // outlive the app with no way left to close it.
-  dismissQuickLook();
 });
-
-// will-quit does not fire on SIGINT/SIGTERM (e.g. Ctrl-C during `npm start`),
-// so the child is reaped here too.
-app.on('before-quit', () => dismissQuickLook());
-process.on('exit', () => dismissQuickLook());
 
 app.on('window-all-closed', () => {
   // With a tray icon, hiding the window must not quit the app on macOS.

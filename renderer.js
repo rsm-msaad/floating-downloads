@@ -29,9 +29,12 @@ const FILE_SVG =
 //             the columns stays readable
 let columns = [];
 
-// Quick Look is an external qlmanage process. This tracks whether we believe
-// it is open, so Space can toggle and Escape can claim the keypress.
-let quickLookOpen = false;
+// What the separate preview window is currently showing, so Arrow Up/Down
+// can walk the column without closing it. This is a belief about another
+// window, kept in sync by the main process — never a handle to it.
+let previewOpen = false;
+let previewColumnIndex = null;
+let previewRowIndex = null;
 
 // The allowed roots, and which one the column trail currently belongs to.
 let roots = [];
@@ -220,25 +223,66 @@ function onRowContextMenu(event, columnIndex, rowIndex) {
   window.api.showContextMenu([...column.selected]);
 }
 
-// ── Quick Look ────────────────────────────────────────────
+// ── Preview ──────────────────────────────────────────────
+// The preview is a separate floating window owned by the main process. This
+// side owns only the column/selection state and decides WHAT to preview; it
+// never touches any window's visibility.
 
-function selectedPaths() {
-  for (const column of columns) {
-    if (column.selected.size > 0) return [...column.selected];
+// First selected row in visual order, across whichever column holds the
+// selection. Multi-selection previews the first item only.
+function firstSelectedLocation() {
+  for (let columnIndex = 0; columnIndex < columns.length; columnIndex++) {
+    const column = columns[columnIndex];
+    if (column.selected.size === 0) continue;
+    for (let rowIndex = 0; rowIndex < column.items.length; rowIndex++) {
+      if (column.selected.has(column.items[rowIndex].path)) return { columnIndex, rowIndex };
+    }
   }
-  return [];
+  return null;
 }
 
-function toggleQuickLook() {
-  if (quickLookOpen) {
-    window.api.dismissQuickLook();
-    quickLookOpen = false;
+function showPreview(columnIndex, rowIndex) {
+  const column = columns[columnIndex];
+  if (!column) return;
+  const item = column.items[rowIndex];
+  if (!item || item.isDirectory) return;
+
+  previewColumnIndex = columnIndex;
+  previewRowIndex = rowIndex;
+  previewOpen = true;
+  window.api.showPreview(item.path);
+}
+
+function closePreview() {
+  if (!previewOpen) return;
+  previewOpen = false;
+  previewColumnIndex = null;
+  previewRowIndex = null;
+  window.api.closePreview();
+}
+
+function togglePreview() {
+  if (previewOpen) {
+    closePreview();
     return;
   }
-  const paths = selectedPaths();
-  if (paths.length === 0) return;
-  window.api.quickLook(paths);
-  quickLookOpen = true;
+  const location = firstSelectedLocation();
+  if (location) showPreview(location.columnIndex, location.rowIndex);
+}
+
+// Walk to the previous/next FILE in the same column, skipping folders, and
+// update the open preview in place.
+function stepPreview(delta) {
+  if (!previewOpen || previewColumnIndex === null) return;
+  const column = columns[previewColumnIndex];
+  if (!column) return;
+
+  for (let i = previewRowIndex + delta; i >= 0 && i < column.items.length; i += delta) {
+    if (column.items[i].isDirectory) continue;
+    selectSingle(previewColumnIndex, i);
+    showPreview(previewColumnIndex, i);
+    return;
+  }
 }
 
 function onRowDragStart(event, columnIndex, rowIndex) {
@@ -465,9 +509,8 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     // Resolution order matters: Quick Look first, then step back a column,
     // then clear the selection.
-    if (quickLookOpen) {
-      window.api.dismissQuickLook();
-      quickLookOpen = false;
+    if (previewOpen) {
+      closePreview();
       return;
     }
     if (closeRightmostColumn()) return;
@@ -485,15 +528,32 @@ document.addEventListener('keydown', (event) => {
   if (event.key === ' ') {
     // Otherwise Space scrolls the column.
     event.preventDefault();
-    toggleQuickLook();
+    togglePreview();
+    return;
+  }
+
+  // Arrow keys walk the previewed column only while the overlay is open, so
+  // they do not interfere with normal scrolling otherwise.
+  if (previewOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+    event.preventDefault();
+    stepPreview(event.key === 'ArrowDown' ? 1 : -1);
   }
 });
 
-// qlmanage can be closed from outside the app; without this the next Space
-// would try to dismiss a panel that has already gone.
-window.api.onQuickLookClosed(() => { quickLookOpen = false; });
 
+// Trashing from the context menu changes the listing under us.
 window.api.onFilesChanged(refresh);
+
+// The preview window can be closed from its own close button or by the panel
+// being hidden. This is a notification only — it changes no visibility here.
+window.api.onPreviewClosed(() => {
+  previewOpen = false;
+  previewColumnIndex = null;
+  previewRowIndex = null;
+});
+
+// Arrow keys pressed in the preview window: only this side knows the column.
+window.api.onPreviewStep(stepPreview);
 
 async function init() {
   try {

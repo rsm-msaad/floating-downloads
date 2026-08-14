@@ -33,10 +33,19 @@ contextBridge.exposeInMainWorld('api', {
   // Native context menu, built and popped up in the main process.
   showContextMenu: (paths) => ipcRenderer.send('menu:show', paths),
 
-  // Quick Look, via qlmanage in the main process.
-  quickLook: (paths) => ipcRenderer.send('ql:preview', paths),
-  dismissQuickLook: () => ipcRenderer.send('ql:dismiss'),
-  onQuickLookClosed: (callback) => ipcRenderer.on('ql-closed', () => callback()),
+  // Preview lives in its own floating window. The panel asks for a file to be
+  // previewed; the preview window renders whatever it is handed. File
+  // contents are never read in either renderer.
+  showPreview: (filePath) => ipcRenderer.send('preview:show', filePath),
+  closePreview: () => ipcRenderer.send('preview:close'),
+  stepPreview: (delta) => ipcRenderer.send('preview:step', delta),
+
+  // Preview window only: the payload to render.
+  onPreviewData: (callback) => ipcRenderer.on('preview-data', (_event, info) => callback(info)),
+
+  // Panel only: keeps its belief about the preview in sync.
+  onPreviewClosed: (callback) => ipcRenderer.on('preview-closed', () => callback()),
+  onPreviewStep: (callback) => ipcRenderer.on('preview-step', (_event, delta) => callback(delta)),
 
   // Fires after files are trashed, so the list can refresh.
   onFilesChanged: (callback) => ipcRenderer.on('files-changed', () => callback())
