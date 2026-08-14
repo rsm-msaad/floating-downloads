@@ -119,6 +119,7 @@ function truncateColumnsAfter(columnIndex) {
     while (columnsEl.children.length > columnIndex + 1) {
       columnsEl.lastElementChild.remove();
     }
+    syncWatchers();
   }
 }
 
@@ -143,6 +144,7 @@ async function openFolder(columnIndex, item) {
   columnsEl.append(buildColumn(columns.length - 1));
   syncSelectionClasses();
   updateCount();
+  syncWatchers();
 
   // Auto-scroll so the newest column is visible. The panel deliberately does
   // not widen itself; the user resizes as they see fit.
@@ -384,6 +386,69 @@ function buildColumn(columnIndex) {
   return columnEl;
 }
 
+// ── Live updates ──────────────────────────────────────────
+
+function syncWatchers() {
+  window.api.setWatched(columns.map((column) => column.path));
+}
+
+// Rebuild one column in place. Selection and scroll position both survive:
+// a refresh must not yank the user back to the top or silently deselect a
+// file that is still there.
+function applyDirChange(payload) {
+  const columnIndex = columns.findIndex((column) => column.path === payload.path);
+  if (columnIndex === -1) return; // a column that has since closed
+
+  // The folder itself is gone: truncate the trail here rather than leaving
+  // a dead column behind.
+  if (!payload.result.ok) {
+    if (columnIndex === 0) {
+      columns = [];
+      showMessage(errorText(payload.result.code));
+      syncWatchers();
+      return;
+    }
+    columns.length = columnIndex;
+    columns[columns.length - 1].openChild = null;
+    while (columnsEl.children.length > columns.length) columnsEl.lastElementChild.remove();
+    syncSelectionClasses();
+    updateCount();
+    syncWatchers();
+    return;
+  }
+
+  const column = columns[columnIndex];
+  const columnEl = columnsEl.children[columnIndex];
+  const scrollTop = columnEl ? columnEl.scrollTop : 0;
+
+  column.items = payload.result.items;
+
+  // Keep only selections that still exist; drop the rest silently.
+  const present = new Set(column.items.map((item) => item.path));
+  for (const selectedPath of [...column.selected]) {
+    if (!present.has(selectedPath)) column.selected.delete(selectedPath);
+  }
+  // The anchor is an index into a list that just changed underneath it.
+  column.anchor = null;
+
+  // If the folder that opened the next column has gone, the trail below it
+  // is meaningless.
+  if (column.openChild && !present.has(column.openChild)) {
+    columns.length = columnIndex + 1;
+    column.openChild = null;
+    while (columnsEl.children.length > columns.length) columnsEl.lastElementChild.remove();
+  }
+
+  const rebuilt = buildColumn(columnIndex);
+  if (columnEl) columnsEl.replaceChild(rebuilt, columnEl);
+  else columnsEl.append(rebuilt);
+  rebuilt.scrollTop = scrollTop;
+
+  syncSelectionClasses();
+  updateCount();
+  syncWatchers();
+}
+
 function renderColumns() {
   const fragment = document.createDocumentFragment();
   columns.forEach((_, columnIndex) => fragment.append(buildColumn(columnIndex)));
@@ -392,6 +457,7 @@ function renderColumns() {
   messageEl.hidden = true;
   syncSelectionClasses();
   updateCount();
+  syncWatchers();
 }
 
 function showMessage(text) {
@@ -422,6 +488,7 @@ function closeRightmostColumn() {
   syncSelectionClasses();
   updateCount();
   columnsEl.scrollLeft = columnsEl.scrollWidth;
+  syncWatchers();
   return true;
 }
 
@@ -497,6 +564,7 @@ async function refresh() {
   if (rebuilt.length === 0) {
     columns = [];
     showMessage(errorText(firstError || 'UNKNOWN'));
+    syncWatchers();
     return;
   }
 
@@ -554,6 +622,9 @@ window.api.onPreviewClosed(() => {
 
 // Arrow keys pressed in the preview window: only this side knows the column.
 window.api.onPreviewStep(stepPreview);
+
+// A watched directory changed. Only that column's contents arrive.
+window.api.onDirChanged(applyDirChange);
 
 async function init() {
   try {

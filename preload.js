@@ -48,5 +48,12 @@ contextBridge.exposeInMainWorld('api', {
   onPreviewStep: (callback) => ipcRenderer.on('preview-step', (_event, delta) => callback(delta)),
 
   // Fires after files are trashed, so the list can refresh.
-  onFilesChanged: (callback) => ipcRenderer.on('files-changed', () => callback())
+  onFilesChanged: (callback) => ipcRenderer.on('files-changed', () => callback()),
+
+  // Live watching. The panel declares which directories are open; the main
+  // process reconciles its watchers against that list.
+  setWatched: (paths) => ipcRenderer.send('watch:set', paths),
+
+  // Delivers only the changed directory's contents, never the whole trail.
+  onDirChanged: (callback) => ipcRenderer.on('dir-changed', (_event, payload) => callback(payload))
 });

@@ -157,6 +157,9 @@ function hidePanel() {
   // showing the panel does NOT bring the preview back, and nothing the
   // preview does affects the panel. See the preview window section.
   hidePreviewWindow();
+  // No point watching for a window nobody can see. The renderer re-arms
+  // these on 'panel-shown', after it has refreshed.
+  unwatchAll();
 }
 
 function togglePanel() {
@@ -278,7 +281,7 @@ ipcMain.on('settings:active-root', (event, key) => {
   writeJsonAtomic(settingsFile(), settings);
 });
 
-ipcMain.handle('dir:read', async (event, requestedPath) => {
+async function readDirectory(requestedPath) {
   const roots = getRoots();
   if (roots.length === 0) return { ok: false, code: 'ENOROOT' };
 
@@ -339,6 +342,104 @@ ipcMain.handle('dir:read', async (event, requestedPath) => {
   const items = settled.filter(Boolean);
   items.sort((a, b) => b.modified - a.modified);
   return { ok: true, items, dir, isRoot: getRoots().some((root) => root.path === dir) };
+}
+
+ipcMain.handle('dir:read', (event, requestedPath) => readDirectory(requestedPath));
+
+// ── Live watching ─────────────────────────────────────────
+// Only while the panel is visible: a hidden window has no reason to burn
+// cycles. Watchers are torn down on hide and re-established on show.
+
+const WATCH_DEBOUNCE_MS = 300;
+
+// A download in progress rewrites its temp file constantly. Ignoring these
+// keeps the list from thrashing; the real file appearing on completion is a
+// separate event that does trigger a refresh.
+const IGNORED_SUFFIXES = ['.crdownload', '.part', '.download'];
+
+// dirPath -> { watcher, timer }
+const watchers = new Map();
+
+function isNoisyChange(filename) {
+  // fs.watch can report a null filename; with no name to judge, refresh.
+  if (!filename) return false;
+  if (filename.startsWith('.')) return true;
+  const lower = filename.toLowerCase();
+  return IGNORED_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
+function scheduleColumnRefresh(dirPath) {
+  const entry = watchers.get(dirPath);
+  if (!entry) return;
+
+  // Debounced so a burst of events during a download collapses into one
+  // read rather than one per event.
+  clearTimeout(entry.timer);
+  entry.timer = setTimeout(async () => {
+    entry.timer = null;
+    if (!watchers.has(dirPath)) return;
+    const result = await readDirectory(dirPath);
+    if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+      // Only this directory's contents cross the bridge, never the whole trail.
+      win.webContents.send('dir-changed', { path: dirPath, result });
+    }
+  }, WATCH_DEBOUNCE_MS);
+}
+
+function unwatchDir(dirPath) {
+  const entry = watchers.get(dirPath);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  try {
+    entry.watcher.close();
+  } catch (err) {
+    // Already closed.
+  }
+  watchers.delete(dirPath);
+}
+
+function unwatchAll() {
+  for (const dirPath of [...watchers.keys()]) unwatchDir(dirPath);
+}
+
+function watchDir(dirPath) {
+  if (watchers.has(dirPath)) return;
+  if (!isAllowedSync(dirPath)) {
+    console.error('[security] refused to watch a path outside all roots');
+    return;
+  }
+
+  let watcher;
+  try {
+    // fs.watch, not fs.watchFile: the latter polls.
+    watcher = fs.watch(dirPath, { persistent: false });
+  } catch (err) {
+    console.error(`[watch] cannot watch ${path.basename(dirPath)}: ${err.code || err.message}`);
+    return;
+  }
+
+  watchers.set(dirPath, { watcher, timer: null });
+
+  watcher.on('change', (eventType, filename) => {
+    if (isNoisyChange(filename)) return;
+    scheduleColumnRefresh(dirPath);
+  });
+
+  watcher.on('error', (err) => {
+    console.error(`[watch] ${path.basename(dirPath)} failed: ${err.message}`);
+    unwatchDir(dirPath);
+  });
+}
+
+// The renderer sends the current trail; this reconciles rather than
+// rebuilding, so unchanged columns keep their existing watcher. Columns that
+// have closed are unwatched here — that is what prevents leaks.
+ipcMain.on('watch:set', (event, paths) => {
+  const wanted = new Set(Array.isArray(paths) ? paths : []);
+  for (const dirPath of [...watchers.keys()]) {
+    if (!wanted.has(dirPath)) unwatchDir(dirPath);
+  }
+  for (const dirPath of wanted) watchDir(dirPath);
 });
 
 // ── Drag out ──────────────────────────────────────────────
@@ -728,6 +829,8 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // Leaked fs watchers hold file descriptors open.
+  unwatchAll();
 });
 
 app.on('window-all-closed', () => {
