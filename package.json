@@ -5,7 +5,10 @@
   "main": "main.js",
   "private": true,
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "icons": "python3 build-icon.py",
+    "build": "electron-packager . FloatingDownloads --platform=darwin --arch=arm64 --icon=./icon.icns --app-bundle-id=com.merna.floatingdownloads --app-version=0.1.0 --extend-info=extend-info.plist --prune=true --overwrite --out=dist && npm run unquarantine",
+    "unquarantine": "xattr -cr 'dist/FloatingDownloads-darwin-arm64/FloatingDownloads.app' && echo 'Built and de-quarantined: dist/FloatingDownloads-darwin-arm64/FloatingDownloads.app'"
   },
   "devDependencies": {
     "@electron/packager": "^18.0.0",

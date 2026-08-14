@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Full colour macOS app icon. NOT a template icon: unlike icon.svg, this
+  renders in colour and carries its own background.
+
+  Geometry follows Apple's current proportions: a 1024 canvas with the
+  rounded square inset to 824 and a corner radius of 185, so the app sits
+  correctly next to system icons in the Dock and Finder.
+
+  The glyph is the same downward arrow into an open tray as the tray icon,
+  drawn on the identical 16 unit grid and scaled up by the transform, so the
+  two shapes are the same artwork rather than two drawings that resemble
+  each other.
+
+  Palette is taken from the panel's own tokens: charcoal background from the
+  bg family, mint arrow from the accent used for selection.
+
+  Regenerate with:  python3 build-icon.py
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262630"/>
+      <stop offset="1" stop-color="#15151A"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#bg)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" ry="184.5"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="3"/>
+
+  <g transform="translate(292,292) scale(27.5)">
+    <g fill="#7EE0B0">
+      <rect x="7" y="1" width="2" height="5"/>
+      <polygon points="4,5.5 12,5.5 8,10.5"/>
+    </g>
+    <g fill="#C9C9D2">
+      <rect x="2" y="10" width="2" height="4"/>
+      <rect x="2" y="12" width="12" height="2"/>
+      <rect x="12" y="10" width="2" height="4"/>
+    </g>
+  </g>
+</svg>
