@@ -344,6 +344,39 @@
     color: var(--faint);
   }
 
+  /* ── Colour swatches ───────────────────────────────────── */
+
+  .swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .swatch {
+    width: 18px; height: 18px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 0;
+    cursor: default;
+    transition: transform 100ms ease, border-color 100ms ease;
+  }
+  .swatch:hover { transform: scale(1.12); }
+  .swatch.selected { border-color: var(--text); }
+  .swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  /* Automatic reads as "no explicit choice" rather than as a tenth colour. */
+  .swatch.auto {
+    display: grid;
+    place-items: center;
+    background: transparent;
+    border-color: var(--stroke);
+    color: var(--faint);
+    font-size: 9px;
+    font-weight: 600;
+  }
+  .swatch.auto:hover { color: var(--text); }
+  .swatch.auto.selected { border-color: var(--text); color: var(--text); }
+
   /* Existing tags inside the tag popover, each removable. */
   .tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
   .tag-chip {

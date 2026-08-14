@@ -42,6 +42,12 @@ let previewRowIndex = null;
 let roots = [];
 let activeRootKey = null;
 
+// Explicit tag colours, keyed by tag name, and the fixed palette they come
+// from. The palette is fetched from the main process so the two cannot
+// disagree about which colours are valid.
+let tagColorMap = {};
+let tagPalette = [];
+
 // ── Formatting ────────────────────────────────────────────
 
 function startOfDay(date) {
@@ -134,6 +140,7 @@ async function openFolder(columnIndex, item) {
     return;
   }
 
+  if (result.tagColors) tagColorMap = result.tagColors;
   columns[columnIndex].openChild = item.path;
   columns.push({
     path: result.dir,
@@ -450,20 +457,102 @@ function markerButton(className, svg, label, onClick) {
 // A tag's colour is derived from its name, so the same tag is always the
 // same colour and the user never picks one. Low saturation and a mid
 // lightness keep it inside the HUD's register.
-function tagColor(tag) {
+// The automatic colour, used until the user picks one explicitly.
+function autoTagColor(tag) {
   let hash = 0;
   for (let i = 0; i < tag.length; i++) hash = (hash * 31 + tag.charCodeAt(i)) % 360;
   return { fg: `hsl(${hash} 46% 70%)`, bg: `hsla(${hash}, 46%, 70%, 0.16)` };
+}
+
+function withAlpha(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// An explicit choice wins; otherwise fall back to the derived colour, so
+// nothing changes until the user actually picks something.
+function tagColor(tag) {
+  const chosen = tagColorMap[tag];
+  if (chosen) return { fg: chosen, bg: withAlpha(chosen, 0.16) };
+  return autoTagColor(tag);
+}
+
+function paintPill(node, tag) {
+  const { fg, bg } = tagColor(tag);
+  node.style.color = fg;
+  node.style.backgroundColor = bg;
 }
 
 function buildPill(tag) {
   const pill = document.createElement('span');
   pill.className = 'pill';
   pill.textContent = tag;
-  const { fg, bg } = tagColor(tag);
-  pill.style.color = fg;
-  pill.style.backgroundColor = bg;
+  pill.dataset.tag = tag;
+  paintPill(pill, tag);
+
+  // Right-clicking a pill picks its colour. stopPropagation is what keeps
+  // the row's file context menu from swallowing it; without it the row
+  // handler fires and the palette never appears.
+  pill.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openColorPopover(tag, pill);
+  });
+
   return pill;
+}
+
+// A tag's colour is global, so repaint every pill in place rather than
+// rebuilding columns — that keeps scroll position and selection.
+function repaintTags() {
+  for (const pill of columnsEl.querySelectorAll('.pill:not(.more)')) {
+    if (pill.dataset.tag) paintPill(pill, pill.dataset.tag);
+  }
+}
+
+// Swatch strip. `selected` is the currently active value, or null for
+// automatic. onPick receives a hex string, or null to reset.
+function buildSwatches(selected, onPick) {
+  const strip = document.createElement('div');
+  strip.className = 'swatches';
+
+  const auto = document.createElement('button');
+  auto.className = `swatch auto${selected ? '' : ' selected'}`;
+  auto.textContent = 'A';
+  auto.title = 'Automatic (derived from the tag name)';
+  auto.setAttribute('aria-label', 'Automatic colour');
+  auto.addEventListener('click', () => onPick(null));
+  strip.append(auto);
+
+  for (const entry of tagPalette) {
+    const swatch = document.createElement('button');
+    swatch.className = `swatch${selected === entry.value ? ' selected' : ''}`;
+    swatch.style.backgroundColor = entry.value;
+    swatch.title = entry.name;
+    swatch.setAttribute('aria-label', entry.name);
+    swatch.addEventListener('click', () => onPick(entry.value));
+    strip.append(swatch);
+  }
+
+  return strip;
+}
+
+function openColorPopover(tag, anchor) {
+  const popover = openPopover(anchor, tag);
+
+  const hint = document.createElement('p');
+  hint.className = 'popover-hint';
+  hint.textContent = 'Applies to this tag everywhere. Escape closes.';
+
+  popover.append(buildSwatches(tagColorMap[tag] || null, async (color) => {
+    // Applied immediately, then closed. Escape before choosing changes
+    // nothing.
+    await window.api.setTagColor(tag, color);
+    closePopover({ save: false });
+  }));
+  popover.append(hint);
 }
 
 // ── Popover ───────────────────────────────────────────────
@@ -584,12 +673,27 @@ async function openTagPopover(filePath, anchor) {
   hint.textContent = 'Return adds. Escape closes.';
   popover.append(hint);
 
+  // Colour can be chosen at creation rather than as a second step. Null
+  // means automatic, which is preselected.
+  let pendingColor = null;
+  const swatches = buildSwatches(null, (color) => {
+    pendingColor = color;
+    // Reflect the choice without closing: the tag does not exist yet.
+    for (const node of swatches.children) node.classList.remove('selected');
+    const index = color === null ? 0 : tagPalette.findIndex((e) => e.value === color) + 1;
+    if (swatches.children[index]) swatches.children[index].classList.add('selected');
+  });
+  popover.append(swatches);
+
   field.addEventListener('keydown', async (event) => {
     if (event.key !== 'Enter') return;
     event.preventDefault();
     const value = field.value.trim();
     if (!value) return;
     await window.api.addTag(filePath, value);
+    // Only write a colour when one was actually picked, so an untouched
+    // palette leaves the tag on automatic.
+    if (pendingColor) await window.api.setTagColor(value, pendingColor);
     closePopover({ save: false });
   });
 
@@ -615,6 +719,11 @@ popoverEl.addEventListener('keydown', (event) => {
 document.addEventListener('mousedown', (event) => {
   if (popoverEl.hidden) return;
   if (!popoverEl.contains(event.target)) closePopover();
+});
+
+window.api.onTagColorsChanged((map) => {
+  tagColorMap = map;
+  repaintTags();
 });
 
 window.api.onOpenTagEditor((filePath) => openTagPopover(filePath));
@@ -780,6 +889,7 @@ function applyDirChange(payload) {
   const scrollTop = columnEl ? columnEl.scrollTop : 0;
 
   column.items = payload.result.items;
+  if (payload.result.tagColors) tagColorMap = payload.result.tagColors;
 
   // Keep only selections that still exist; drop the rest silently.
   const present = new Set(column.items.map((item) => item.path));
@@ -910,6 +1020,7 @@ async function refresh() {
       if (rebuilt.length === 0) firstError = result.code;
       break;
     }
+    if (result.tagColors) tagColorMap = result.tagColors;
     rebuilt.push({
       path: result.dir,
       items: result.items,
@@ -1019,6 +1130,13 @@ window.api.onDirChanged(applyDirChange);
 window.api.onOperationError(showToast);
 
 async function init() {
+  try {
+    tagPalette = await window.api.tagPalette();
+    tagColorMap = await window.api.tagColors();
+  } catch (err) {
+    console.error('[renderer] could not load the tag palette:', err);
+  }
+
   try {
     const result = await window.api.listRoots();
     roots = result.roots || [];

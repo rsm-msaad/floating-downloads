@@ -70,6 +70,13 @@ contextBridge.exposeInMainWorld('api', {
 
   // Tags, notes and pins. One metadata layer keyed by absolute path.
   knownTags: () => ipcRenderer.invoke('meta:known-tags'),
+
+  // Explicit tag colours, keyed by tag name. Pass null to reset to the
+  // automatic name-derived colour.
+  tagPalette: () => ipcRenderer.invoke('meta:palette'),
+  tagColors: () => ipcRenderer.invoke('meta:tag-colors'),
+  setTagColor: (tag, color) => ipcRenderer.invoke('meta:set-tag-color', tag, color),
+  onTagColorsChanged: (cb) => ipcRenderer.on('tag-colors-changed', (_e, map) => cb(map)),
   getNote: (filePath) => ipcRenderer.invoke('meta:note', filePath),
   addTag: (filePath, tag) => ipcRenderer.invoke('meta:add-tag', filePath, tag),
   removeTag: (filePath, tag) => ipcRenderer.invoke('meta:remove-tag', filePath, tag),

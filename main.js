@@ -407,7 +407,15 @@ async function readDirectory(requestedPath) {
   const items = settled.filter(Boolean);
   // Pinned first, newest-first within each group.
   items.sort((a, b) => (b.pinned === true) - (a.pinned === true) || b.modified - a.modified);
-  return { ok: true, items, dir, isRoot: getRoots().some((root) => root.path === dir) };
+  return {
+    ok: true,
+    items,
+    dir,
+    isRoot: getRoots().some((root) => root.path === dir),
+    // Shipped with every listing so pills can never render with a stale
+    // colour map.
+    tagColors: metadata.tagColors
+  };
 }
 
 ipcMain.handle('dir:read', (event, requestedPath) => readDirectory(requestedPath));
@@ -699,7 +707,23 @@ ipcMain.on('menu:show', (event, paths, destDir) => {
 // decision, made knowingly (context_v4.md). There is no path-following or
 // recovery logic here on purpose — do not add any.
 
-let metadata = { version: 1, entries: {}, knownTags: [] };
+let metadata = { version: 1, entries: {}, knownTags: [], tagColors: {} };
+
+// A fixed set rather than a full colour picker. Mid lightness and modest
+// saturation so pills stay legible at 9px uppercase without glowing against
+// the dark panel. Four are existing project tokens, so tagged rows look
+// native rather than bolted on.
+const TAG_PALETTE = [
+  { name: 'Coral', value: '#F0736A' },
+  { name: 'Amber', value: '#E8A54B' },
+  { name: 'Mint', value: '#7EE0B0' },
+  { name: 'Blue', value: '#7B94C4' },
+  { name: 'Purple', value: '#A98BD1' },
+  { name: 'Pink', value: '#DB86A8' },
+  { name: 'Teal', value: '#6FC5C0' },
+  { name: 'Lime', value: '#A8C46A' },
+  { name: 'Grey', value: '#9A9AA4' }
+];
 
 function metadataFile() {
   return path.join(app.getPath('userData'), 'metadata.json');
@@ -729,7 +753,11 @@ function loadMetadata() {
     version: 1,
     entries,
     // Every tag ever used is remembered, even once no file carries it.
-    knownTags: Array.isArray(loaded.knownTags) ? loaded.knownTags : []
+    knownTags: Array.isArray(loaded.knownTags) ? loaded.knownTags : [],
+    // Keyed by tag NAME, not by file: setting "urgent" to red makes every
+    // urgent pill red everywhere. Never pruned, so reusing a tag months
+    // later keeps the colour it was given.
+    tagColors: loaded.tagColors && typeof loaded.tagColors === 'object' ? loaded.tagColors : {}
   };
 
   if (pruned > 0) {
@@ -773,6 +801,35 @@ function guardPath(filePath) {
 }
 
 ipcMain.handle('meta:known-tags', () => metadata.knownTags);
+
+// The palette lives here so main and the renderer cannot drift apart about
+// which colours are valid.
+ipcMain.handle('meta:palette', () => TAG_PALETTE);
+
+ipcMain.handle('meta:tag-colors', () => metadata.tagColors);
+
+// color === null resets the tag to its automatic, name-derived colour.
+ipcMain.handle('meta:set-tag-color', (event, tag, color) => {
+  const label = String(tag || '').trim();
+  if (!label) return metadata.tagColors;
+
+  if (color === null || color === undefined) {
+    delete metadata.tagColors[label];
+  } else if (TAG_PALETTE.some((entry) => entry.value === color)) {
+    metadata.tagColors[label] = color;
+  } else {
+    console.error(`[metadata] rejected off-palette colour ${color}`);
+    return metadata.tagColors;
+  }
+
+  saveMetadata();
+
+  // A tag's colour is global, so every open column may need repainting.
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send('tag-colors-changed', metadata.tagColors);
+  }
+  return metadata.tagColors;
+});
 
 ipcMain.handle('meta:note', (event, filePath) => {
   if (!guardPath(filePath)) return '';
