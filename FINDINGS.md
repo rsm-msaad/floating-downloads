@@ -1,7 +1,68 @@
 # FINDINGS
 
 Reusable lessons. Project-specific gotchas live in
-[`context_v5.md`](context_v5.md); this file is what generalises.
+[`context_v7.md`](context_v7.md); this file is what generalises.
+
+---
+
+## 2026-08-14 (evening)
+
+### "The program says it is fine" is a claim about the program, not the world
+
+The panel bug survived a thorough instrumented investigation that checked
+the window was not null or destroyed, that bounds were inside the work area,
+that opacity was 1, that it was not minimized, that the renderer loaded
+cleanly, that the DOM was fully populated, and that CSP raised no
+violations. Every finding was correct and the bug was none of them.
+
+Every one of those probes asks the object about **its own state**. None asks
+what is **in front of it**. A window can be healthy, correctly positioned,
+fully painted and simply covered by something else, and no amount of
+interrogating the window will reveal that.
+
+One `screencapture -x` ended it in seconds by contradicting `isVisible()`
+directly. **When something reports healthy but the user says it is not
+there, stop asking the component and go measure the outside world.**
+
+### A "long-running instance degrades" story is often just sleep
+
+The symptom looked time-dependent: fresh instances fine, hours-old ones
+broken. The real mechanism was that macOS resets window settings across
+sleep, and the machine slept between "working" and "broken". Uptime
+correlated with the failure only because uptime correlates with having slept
+at least once.
+
+Heartbeat gaps are the tell — long stretches with no entry while `uptime`
+still tracks wall clock means the process lived through a sleep. It also
+means a heartbeat **cannot** distinguish "dead" from "asleep", which limits
+its value as an abrupt-end detector.
+
+### State that the OS can reset must be re-asserted, not set once
+
+`setAlwaysOnTop` and `setVisibleOnAllWorkspaces` were configured at window
+creation. macOS drops both across sleep/wake, display reconfiguration and
+fullscreen transitions. Anything the window server owns should be re-applied
+at every point where it matters, not assumed to persist. Both calls are
+idempotent, so re-applying is free — the cost of getting this wrong is an
+intermittent bug that looks like decay.
+
+### Two calls that look redundant may be doing different jobs
+
+`setVisibleOnAllWorkspaces({ visibleOnFullScreen: true })` decides **which
+Space** a window is on. `setAlwaysOnTop(win, level)` decides **what it
+stacks above** once it is there. Having the first without a high enough
+level produces a window that is on the right Space and underneath
+everything — present by every measure, invisible in fact. On macOS,
+`'floating'` (level 3) loses to fullscreen apps; `'screen-saver'` clears
+them.
+
+### A toggle that reads live state will invert when that state lies
+
+`togglePanel` branched on `isVisible()`. While the window was covered but
+still reporting visible, every keypress took the *hide* branch. The user
+sees nothing happen, presses again, and it works — which reads as a flaky
+hotkey rather than a state bug. Symptoms that alternate on repeat attempts
+are worth suspecting as a toggle reading a stale or wrong predicate.
 
 ---
 

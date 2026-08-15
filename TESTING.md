@@ -28,8 +28,18 @@ not regression tests, which is itself a gap.
 
 ## Verified by hand (author)
 
-Per `context_v5.md`: drag out (including from the packaged build), column
+Per `context_v7.md`: drag out (including from the packaged build), column
 navigation, multi-select drag, tray clicks, hotkey, preview window.
+
+Added 2026-08-14 (evening): the panel showing above a **fullscreen** app,
+confirmed by the author with repeated hotkey presses over fullscreen Chrome.
+The sleep/wake half of that fix is **not** verified — it needs a real sleep
+cycle, after which `crash.log` should contain
+`resume: re-applied panel level and workspace visibility`.
+
+The window level fix shipped with no automated test. A window level is not
+unit testable without a harness this repo does not have, so this is a known
+gap rather than an oversight.
 
 ## Not verified by anyone
 
