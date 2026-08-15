@@ -1,6 +1,6 @@
 const {
   app, BrowserWindow, Menu, Tray, screen, globalShortcut, ipcMain, nativeImage,
-  shell, clipboard, protocol, net, crashReporter
+  shell, clipboard, protocol, net, crashReporter, powerMonitor
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -215,6 +215,24 @@ function ensureOnScreen() {
   logEvent(message);
 }
 
+// The panel's "stay above everything, on every Space" contract, in one place.
+//
+// 'screen-saver', not 'floating': the two calls do different jobs and both are
+// needed. setVisibleOnAllWorkspaces puts the panel *on* a fullscreen app's
+// Space; the level decides what it stacks above once it is there. 'floating'
+// is NSFloatingWindowLevel (3), which a fullscreen app sits above, so the
+// panel rendered underneath Chrome and looked like it never opened at all.
+//
+// This is re-applied on every show and on wake, not just at creation, because
+// macOS quietly drops both settings across sleep/wake, display changes, and
+// fullscreen transitions. Setting them once was why the panel worked and then
+// "just stopped working" some time later. Both calls are idempotent.
+function applyPanelLevel() {
+  if (!win || win.isDestroyed()) return;
+  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+}
+
 function createWindow() {
   const saved = loadState();
   const area = screen.getPrimaryDisplay().workArea;
@@ -256,8 +274,7 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, 'index.html'));
 
-  win.setAlwaysOnTop(true, 'floating');
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  applyPanelLevel();
 
   win.on('moved', saveState);
   win.on('resized', saveState);
@@ -272,13 +289,21 @@ function showPanel() {
     createWindow();
     win.once('ready-to-show', () => {
       ensureOnScreen();
+      applyPanelLevel();
       win.showInactive();
+      win.moveTop();
     });
     return;
   }
   // Displays may have changed since the last show.
   ensureOnScreen();
+  // Re-asserted here rather than trusting what createWindow set, because macOS
+  // drops it across sleep and fullscreen transitions. See applyPanelLevel.
+  applyPanelLevel();
   win.showInactive();
+  // Raise above other windows already at this level. moveTop() reorders only —
+  // it does not activate the app, so the no-focus-stealing rule still holds.
+  win.moveTop();
   // The renderer re-reads the folder on this, so the list is current every
   // time the hotkey is pressed. Live watching is phase 5.
   if (!win.webContents.isDestroyed()) win.webContents.send('panel-shown');
@@ -1457,7 +1482,10 @@ function ensurePreviewWindow() {
   });
 
   previewWin.loadFile(path.join(__dirname, 'preview.html'));
-  previewWin.setAlwaysOnTop(true, 'floating');
+  // Same level as the panel, for the same fullscreen reason. Within one level
+  // the most recently shown window wins, and the preview is always opened from
+  // the panel, so it still lands on top of it.
+  previewWin.setAlwaysOnTop(true, 'screen-saver');
   previewWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   previewWin.on('closed', () => { previewWin = null; });
@@ -1552,9 +1580,13 @@ function openPreferences() {
   prefsWin.loadFile(path.join(__dirname, 'preferences.html'));
 
   // The panel floats above normal windows, so without this Preferences can
-  // open behind it and look like nothing happened. Not the 'floating' HUD
-  // treatment otherwise — this is an ordinary window.
-  prefsWin.setAlwaysOnTop(true, 'floating');
+  // open behind it and look like nothing happened. It has to match the panel's
+  // level to stay in front of it — at anything lower the panel covers it.
+  prefsWin.setAlwaysOnTop(true, 'screen-saver');
+  // And it needs the panel's Space treatment too, or opening Preferences from
+  // the tray while a fullscreen app is focused puts it on the desktop Space
+  // where it cannot be seen.
+  prefsWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   prefsWin.once('ready-to-show', () => {
     // Unlike the panel and preview, this one takes focus on purpose.
@@ -1623,6 +1655,22 @@ app.whenReady().then(() => {
   // Show once on launch so the scaffold is visibly working, without taking
   // focus from whatever is frontmost.
   win.once('ready-to-show', () => win.showInactive());
+
+  // Sleep is the main way the panel silently loses its always-on-top and
+  // all-Spaces settings, after which the hotkey appears to do nothing because
+  // the panel opens behind whatever is fullscreen. Re-assert on wake, and log
+  // it, so a recurrence shows up in crash.log instead of being guessed at.
+  powerMonitor.on('resume', () => {
+    applyPanelLevel();
+    logEvent('resume: re-applied panel level and workspace visibility');
+  });
+
+  // Same reasoning for display changes — plugging or unplugging a monitor
+  // reconfigures the window server and can drop the level too.
+  screen.on('display-metrics-changed', () => {
+    applyPanelLevel();
+    logEvent('display-metrics-changed: re-applied panel level');
+  });
 });
 
 // Renderer and GPU crashes, which the main process DOES survive. These would
