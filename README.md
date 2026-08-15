@@ -1,10 +1,11 @@
 # FloatingDownloads
 
-> **[`context_v5.md`](context_v5.md) is the current source of truth.** Earlier
-> versions (`context_v1.md` … `context_v4.md`) are kept only as history — do not
+> **[`context_v7.md`](context_v7.md) is the current source of truth.** Earlier
+> versions (`context_v1.md` … `context_v6.md`) are kept only as history — do not
 > work from them. v1 records an abandoned Swift/AppKit approach, v2 the Electron
 > pivot, v3 the state through column view, v4 the state through the preview
-> window.
+> window, v5 feature completion and packaging, v6 the state while the panel
+> visibility bug was still open.
 
 A macOS menu bar utility built with Electron. A single global keyboard shortcut
 toggles a floating, always-on-top panel showing the contents of `~/Downloads`
@@ -48,7 +49,7 @@ running as a `.app`. What remains is polish.
 
 Every filesystem path is validated against an allow-list of roots in the main
 process before any operation, with symlinks resolved first. See the security
-boundary section of [`context_v5.md`](context_v5.md).
+boundary section of [`context_v7.md`](context_v7.md).
 
 ## Development
 
@@ -82,4 +83,4 @@ opens without a Gatekeeper prompt.
 ## Notes
 
 Architecture, standing decisions, constraints, and known gotchas live in
-[`context_v5.md`](context_v5.md).
+[`context_v7.md`](context_v7.md).
