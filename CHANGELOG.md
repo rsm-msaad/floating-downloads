@@ -4,6 +4,55 @@ Most recent first.
 
 ---
 
+## 2026-08-14 (evening) — panel visibility bug solved
+
+### What changed
+
+- **Panel window level fixed** (`e5a729e`). The panel used
+  `setAlwaysOnTop(true, 'floating')`, which a macOS fullscreen app stacks
+  above, so `setVisibleOnAllWorkspaces` put it on the fullscreen Space and
+  the level then rendered it underneath. Raised the panel, preview and
+  Preferences to `'screen-saver'`, and gave Preferences the
+  `setVisibleOnAllWorkspaces` call it never had.
+- **Level and Space membership now re-asserted, not set once.** Moved into
+  `applyPanelLevel()` and called from `createWindow()`, `showPanel()`,
+  `powerMonitor` `'resume'` and `screen` `'display-metrics-changed'`, since
+  macOS drops both across sleep, display changes and fullscreen
+  transitions. `showPanel()` also calls `moveTop()`, which reorders without
+  activating.
+- **`context_v7.md` added** (`ea486e9`). New source of truth, superseding
+  v6. Records the resolution, adds hard constraint 4 (`isVisible()` true is
+  not a claim the user can see the window), and downgrades the SIGSEGV.
+- **README repointed at v7** (`b644d18`). Its source-of-truth links still
+  referenced v5, two versions behind.
+- **BUGS.md, HANDOFF.md and CHANGELOG.md brought in line.** All three still
+  described the panel bug as open and undiagnosed.
+
+### PRs merged
+
+None. Committed directly to `main`, per the project's existing convention.
+
+### Known issues
+
+- The sleep/wake half of the fix is **unverified**. It is reasoned from the
+  heartbeat gaps in `crash.log`, not observed. After a real wake the log
+  should contain `resume: re-applied panel level and workspace visibility`
+- The SIGSEGV is downgraded, not closed. Crashpad is empty and every
+  recorded termination is a clean quit, but `crash.log` only begins
+  `2026-08-14T04:11Z` and does not cover the original three occurrences
+- Hotkey registration success/failure is written to the console only, so in
+  a packaged app a genuine registration failure is invisible
+- Still no automated tests and no lint config. This fix shipped without a
+  test
+
+### Next priorities
+
+1. Confirm the sleep/wake fix after a real wake
+2. Route hotkey registration through `logEvent`
+3. Build `CODEMAP.md`
+
+---
+
 ## 2026-08-13 → 2026-08-14 — empty folder to packaged app
 
 ### What changed
