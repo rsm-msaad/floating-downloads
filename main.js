@@ -217,19 +217,29 @@ function ensureOnScreen() {
 
 // The panel's "stay above everything, on every Space" contract, in one place.
 //
-// 'screen-saver', not 'floating': the two calls do different jobs and both are
-// needed. setVisibleOnAllWorkspaces puts the panel *on* a fullscreen app's
-// Space; the level decides what it stacks above once it is there. 'floating'
-// is NSFloatingWindowLevel (3), which a fullscreen app sits above, so the
-// panel rendered underneath Chrome and looked like it never opened at all.
+// 'floating', deliberately, and NOT a higher level. This was got wrong twice.
 //
-// This is re-applied on every show and on wake, not just at creation, because
-// macOS quietly drops both settings across sleep/wake, display changes, and
-// fullscreen transitions. Setting them once was why the panel worked and then
-// "just stopped working" some time later. Both calls are idempotent.
+// The two calls do different jobs: setVisibleOnAllWorkspaces decides which
+// Space the window joins, the level decides what it stacks above once there.
+// The first failed diagnosis assumed a fullscreen app outranked 'floating'
+// (NSFloatingWindowLevel, 3) and raised this to 'screen-saver' (1000).
+//
+// A CGWindowList dump disproved that outright: with the panel at layer 1000,
+// the fullscreen app it was supposedly hidden behind sat at layer 0. Stacking
+// was never the problem. What broke was Space membership — macOS's
+// fullScreenAuxiliary behaviour, which is what lets a window join a fullscreen
+// Space at all, is dependable at 'floating' and stops being dependable at
+// extreme levels. Raising the level did not fix the bug, it caused a new one.
+//
+// floating-todo, which shares this window config and works over fullscreen,
+// uses 'floating'. Match it. Do not "improve" this to a higher level.
+//
+// Re-applied on every show and on wake rather than set once, because macOS
+// drops both settings across sleep/wake, display changes and fullscreen
+// transitions. Both calls are idempotent.
 function applyPanelLevel() {
   if (!win || win.isDestroyed()) return;
-  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setAlwaysOnTop(true, 'floating');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 }
 
@@ -290,8 +300,12 @@ function showPanel() {
     win.once('ready-to-show', () => {
       ensureOnScreen();
       applyPanelLevel();
-      win.showInactive();
+      // Activate then show, for the same reason as the main path below.
+      app.focus({ steal: true });
+      win.show();
+      applyPanelLevel();
       win.moveTop();
+      logPanelState('first-show');
     });
     return;
   }
@@ -300,17 +314,71 @@ function showPanel() {
   // Re-asserted here rather than trusting what createWindow set, because macOS
   // drops it across sleep and fullscreen transitions. See applyPanelLevel.
   applyPanelLevel();
-  win.showInactive();
+  // show(), NOT showInactive(). This is the fix for the panel not appearing
+  // over a fullscreen app, and it overrides the original constraint 2.
+  //
+  // showInactive() orders the window front without activating the app. On
+  // macOS a hidden window has been ordered out of the fullscreen Space, and
+  // only activation re-inserts it — so showInactive() reliably produced a
+  // window with every flag correct (allWorkspaces=true, alwaysOnTop=true,
+  // isVisible()=true) sitting on the desktop Space, invisible to a user in
+  // fullscreen. The logs showed exactly that, on every single press.
+  //
+  // Established by comparing against floating-todo, which has a near-identical
+  // window config, works over fullscreen, and differs only in calling show().
+  // That comparison also disproved the earlier theory that the window level
+  // was at fault: floating-todo uses 'floating' and works.
+  //
+  // Cost: this takes focus. That is a real regression against "summoned
+  // without pulling focus from whatever you are typing in", accepted because
+  // appearing at all over a fullscreen app is the app's whole purpose.
+  //
+  // app.focus({steal:true}) FIRST, and it is the actual fix for the fullscreen
+  // bug — not the window level, which was a wrong turn taken twice.
+  //
+  // A global shortcut fires while this app is in the background and some other
+  // app owns the current Space. show() alone does not activate us, so macOS
+  // leaves the window on the desktop Space: every flag correct, isVisible()
+  // true, nothing where the user is looking. Activating first is what moves it
+  // onto the fullscreen Space.
+  //
+  // This is why floating-todo never hit the bug. It has no global shortcut at
+  // all — it is toggled from tray.on('click'), and clicking the menu bar
+  // activates the app implicitly. Verified by running both side by side: at
+  // identical layer 3, Checklist read onscreen=True over a fullscreen VS Code
+  // while this panel read onscreen=None.
+  app.focus({ steal: true });
+  win.show();
+  applyPanelLevel();
   // Raise above other windows already at this level. moveTop() reorders only —
   // it does not activate the app, so the no-focus-stealing rule still holds.
   win.moveTop();
+  logPanelState('show');
   // The renderer re-reads the folder on this, so the list is current every
   // time the hotkey is pressed. Live watching is phase 5.
   if (!win.webContents.isDestroyed()) win.webContents.send('panel-shown');
 }
 
+// Records what the window server actually believes, right after a show. The
+// point is isVisibleOnAllWorkspaces(): if that reads false here, the flag is
+// being reset by something after applyPanelLevel() ran, which is the failure
+// mode that made the panel invisible over fullscreen apps.
+function logPanelState(tag) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    logEvent(
+      `panel-state ${tag} visible=${win.isVisible()} ` +
+      `allWorkspaces=${win.isVisibleOnAllWorkspaces()} ` +
+      `alwaysOnTop=${win.isAlwaysOnTop()} bounds=${JSON.stringify(win.getBounds())}`
+    );
+  } catch (err) {
+    logEvent(`panel-state ${tag} probe failed: ${err.message}`);
+  }
+}
+
 function hidePanel() {
   if (!win || win.isDestroyed()) return;
+  logPanelState('before-hide');
   win.hide();
   // One-directional by design: hiding the panel hides the preview, but
   // showing the panel does NOT bring the preview back, and nothing the
@@ -321,12 +389,22 @@ function hidePanel() {
   unwatchAll();
 }
 
+// Every invocation is logged with the branch taken, because the failure this
+// is chasing is not "the panel would not show" but "the keypress took the hide
+// branch when the user expected show". Without a line per press there is no way
+// to tell a dead hotkey from a toggle that ran and did the wrong thing.
 function togglePanel() {
   if (!win || win.isDestroyed()) {
+    logEvent('toggle: window missing -> show');
     showPanel();
     return;
   }
-  if (win.isVisible()) {
+  const visible = win.isVisible();
+  let onAll = null;
+  try { onAll = win.isVisibleOnAllWorkspaces(); } catch (err) { onAll = `err:${err.message}`; }
+  logEvent(`toggle: visible=${visible} allWorkspaces=${onAll} -> ${visible ? 'hide' : 'show'}`);
+
+  if (visible) {
     hidePanel();
   } else {
     showPanel();
@@ -1485,7 +1563,7 @@ function ensurePreviewWindow() {
   // Same level as the panel, for the same fullscreen reason. Within one level
   // the most recently shown window wins, and the preview is always opened from
   // the panel, so it still lands on top of it.
-  previewWin.setAlwaysOnTop(true, 'screen-saver');
+  previewWin.setAlwaysOnTop(true, 'floating');
   previewWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   previewWin.on('closed', () => { previewWin = null; });
@@ -1582,7 +1660,7 @@ function openPreferences() {
   // The panel floats above normal windows, so without this Preferences can
   // open behind it and look like nothing happened. It has to match the panel's
   // level to stay in front of it — at anything lower the panel covers it.
-  prefsWin.setAlwaysOnTop(true, 'screen-saver');
+  prefsWin.setAlwaysOnTop(true, 'floating');
   // And it needs the panel's Space treatment too, or opening Preferences from
   // the tray while a fullscreen app is focused puts it on the desktop Space
   // where it cannot be seen.
@@ -1667,9 +1745,25 @@ app.whenReady().then(() => {
 
   // Same reasoning for display changes — plugging or unplugging a monitor
   // reconfigures the window server and can drop the level too.
+  //
+  // macOS fires this in bursts, roughly every 100ms while displays settle after
+  // a wake. Always re-apply (it is idempotent and cheap) but coalesce the log
+  // line, or one wake writes thirty identical entries and buries everything
+  // useful in crash.log. An earlier version of this handler did exactly that.
+  let displayLogTimer = null;
+  let displayBurstCount = 0;
   screen.on('display-metrics-changed', () => {
     applyPanelLevel();
-    logEvent('display-metrics-changed: re-applied panel level');
+    displayBurstCount += 1;
+    clearTimeout(displayLogTimer);
+    displayLogTimer = setTimeout(() => {
+      logEvent(
+        `display-metrics-changed: re-applied panel level ` +
+        `(${displayBurstCount} event${displayBurstCount === 1 ? '' : 's'} in burst)`
+      );
+      displayBurstCount = 0;
+    }, 1000);
+    displayLogTimer.unref?.();
   });
 });
 
